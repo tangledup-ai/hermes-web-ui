@@ -6,7 +6,7 @@
   "artifactFormat": "tar.gz",
   "packageUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.6.18/hermes-web-ui-device-v0.6.18.tar.gz",
   "sha256": "3ad0f510479bcca9a94307e99e7bba2068447cf17eae540d3aeea988288df6f9",
-  "releasedAt": "2026-06-12T07:18:32.626Z",
+  "releasedAt": "2026-06-12T07:28:27.306Z",
   "compatibleNodeRange": ">=23.0.0",
   "minCurrentVersion": "0.6.13",
   "notesUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/tag/v0.6.18",
