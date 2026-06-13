@@ -10,7 +10,7 @@
     "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.6.21/hermes-web-ui-device-v0.6.21.tar.gz"
   ],
   "sha256": "752f9954b581b91e07413ef95e153e341f94eb37c271d52d85cee75a321eeba1",
-  "releasedAt": "2026-06-13T06:24:42.155Z",
+  "releasedAt": "2026-06-13T06:36:06.588Z",
   "compatibleNodeRange": ">=23.0.0",
   "minCurrentVersion": "0.6.13",
   "notesUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/tag/v0.6.21",
