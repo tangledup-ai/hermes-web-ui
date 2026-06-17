@@ -1,5 +1,5 @@
 {
-  "version": "0.6.15",
+  "version": "0.6.16",
   "channel": "stable",
   "sourceLabel": "Quanthermes Device Releases",
   "packageType": "device-package",
@@ -9,11 +9,11 @@
     "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/releases/v0.6.16/hermes-web-ui-device-v0.6.16.tar.gz",
     "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.6.16/hermes-web-ui-device-v0.6.16.tar.gz"
   ],
-  "sha256": "c16ced8dad0451aa11506cc253e0b3898e4ade13715881efa8693c0fdae3002e",
-  "releasedAt": "2026-06-17T09:05:34.456Z",
+  "sha256": "d2d68737bb62e9aa40ec27099fc8c5efce6aeda38a4f1429f1c0ced99e35bf75",
+  "releasedAt": "2026-06-17T09:18:33.350Z",
   "compatibleNodeRange": ">=23.0.0",
   "minCurrentVersion": "0.6.15",
   "notesUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/tag/v0.6.16",
-  "size": 24124261,
+  "size": 24124247,
   "healthcheckUrl": "http://127.0.0.1:6060/health"
 }
