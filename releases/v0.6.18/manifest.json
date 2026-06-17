@@ -4,12 +4,16 @@
   "sourceLabel": "Quanthermes Device Releases",
   "packageType": "device-package",
   "artifactFormat": "tar.gz",
-  "packageUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.6.18/hermes-web-ui-device-v0.6.18.tar.gz",
-  "sha256": "3ad0f510479bcca9a94307e99e7bba2068447cf17eae540d3aeea988288df6f9",
-  "releasedAt": "2026-06-12T07:28:27.306Z",
+  "packageUrl": "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/releases/v0.6.18/hermes-web-ui-device-v0.6.18.tar.gz",
+  "packageUrls": [
+    "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/releases/v0.6.18/hermes-web-ui-device-v0.6.18.tar.gz",
+    "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.6.18/hermes-web-ui-device-v0.6.18.tar.gz"
+  ],
+  "sha256": "02acfd23b46406571ee04238ace8aa8d78a9b1de951b12c3ba22331805278b49",
+  "releasedAt": "2026-06-17T10:52:28.371Z",
   "compatibleNodeRange": ">=23.0.0",
-  "minCurrentVersion": "0.6.13",
+  "minCurrentVersion": "0.6.15",
   "notesUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/tag/v0.6.18",
-  "size": 42479147,
+  "size": 24130662,
   "healthcheckUrl": "http://127.0.0.1:6060/health"
 }
