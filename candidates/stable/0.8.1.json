@@ -8,12 +8,12 @@
   "packageUrls": [
     "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/releases/v0.8.1/hermes-web-ui-device-v0.8.1.tar.gz"
   ],
-  "sha256": "d8ac8b4cc9d5c8ff83af9068a46170401d451d3924035d5f6206ecaa8455f965",
-  "releasedAt": "2026-09-07T10:23:28.066Z",
+  "sha256": "239b6b144ee0b40f3d7fee91b111da4019b225937cdf3169817e6fcb1ac520ae",
+  "releasedAt": "2026-09-07T10:51:00.241Z",
   "compatibleNodeRange": ">=23.0.0",
   "minCurrentVersion": "0.6.15",
   "notesUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/tag/v0.8.1",
-  "size": 52527069,
+  "size": 52527062,
   "healthcheckUrl": "http://127.0.0.1:6060/health",
   "hostDependenciesPath": "release/device-host-dependencies.json",
   "hostDependencies": {
@@ -67,7 +67,7 @@
     ]
   },
   "installerScriptPath": "scripts/update-orchestrator.sh",
-  "installerScriptSha256": "1b3acd722c5838ea6066cca66b7048e77914e2aad4b560b6a6995e88b149af82",
+  "installerScriptSha256": "26396bde286d22fea10ff93330415c47bcaacc7147101d1ce4cd35887adf2dd5",
   "identity": {
     "distSha256": "232e74949aea070b0021743aaa3ecfa1d60fde50712ff39fbf79c1e0d8bf05c0",
     "versionString": "0.8.1"
@@ -78,7 +78,7 @@
     "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/sources/v0.8.1/hermes-web-ui-source-v0.8.1.tar.gz",
     "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.8.1/hermes-web-ui-source-v0.8.1.tar.gz"
   ],
-  "sourceSha256": "7036f710c1d0c4ef41c4ccefe413f63e2af9d7487dcdec6021af6b10097025d1",
-  "sourceSize": 68530228,
+  "sourceSha256": "db7bb3cbb24e40fa5c5b5e9d6fc673e314449969c5c429f464cc7a7e016a1200",
+  "sourceSize": 68530187,
   "sourceRepoUrl": "https://github.com/tangledup-ai/hermes-web-ui"
 }
