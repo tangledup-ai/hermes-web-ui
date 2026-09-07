@@ -1,0 +1,84 @@
+{
+  "version": "0.8.2",
+  "channel": "stable",
+  "sourceLabel": "Quanthermes Device Releases",
+  "packageType": "source-deploy",
+  "artifactFormat": "tar.gz",
+  "packageUrl": "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/releases/v0.8.2/hermes-web-ui-device-v0.8.2.tar.gz",
+  "packageUrls": [
+    "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/releases/v0.8.2/hermes-web-ui-device-v0.8.2.tar.gz"
+  ],
+  "sha256": "512599207f404d1e91b20c685ade6c80d93c4aae9d1b1a12f3ddb7a79cdbc536",
+  "releasedAt": "2026-09-07T13:13:51.981Z",
+  "compatibleNodeRange": ">=23.0.0",
+  "minCurrentVersion": "0.6.15",
+  "notesUrl": "https://github.com/tangledup-ai/hermes-web-ui/releases/tag/v0.8.2",
+  "size": 52532398,
+  "healthcheckUrl": "http://127.0.0.1:6060/health",
+  "hostDependenciesPath": "release/device-host-dependencies.json",
+  "hostDependencies": {
+    "schema": 1,
+    "aptPackages": [
+      "python3-pyudev",
+      "ntfs-3g",
+      "exfatprogs",
+      "util-linux",
+      "python3-venv",
+      "python3-dev",
+      "gcc",
+      "build-essential"
+    ]
+  },
+  "environment": {
+    "requiredNodeRange": ">=23.0.0",
+    "requiredSystemFiles": [
+      {
+        "path": "scripts/install-device-package.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/update-source-deploy.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/deploy-source-armbian.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/generate-server-cert.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/hermes-web-ui-update-runner.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/update-orchestrator.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/recover-interrupted-update.sh",
+        "kind": "executable"
+      },
+      {
+        "path": "scripts/journal-validator.sh",
+        "kind": "executable"
+      }
+    ]
+  },
+  "installerScriptPath": "scripts/update-orchestrator.sh",
+  "installerScriptSha256": "7b43dcbf09bb63a3158195bf51c90524bad7b0c23ee8e3b4df8d5dbefac88a04",
+  "identity": {
+    "distSha256": "cb5c04835f2b71aa70b7aae9d23c35a04d781992598e8ac9c841e0d05aaa2c39",
+    "versionString": "0.8.2"
+  },
+  "sourceArtifactFormat": "tar.gz",
+  "sourceUrl": "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/sources/v0.8.2/hermes-web-ui-source-v0.8.2.tar.gz",
+  "sourceUrls": [
+    "https://tangledup-ai-staging.oss-cn-shanghai.aliyuncs.com/quanthermes_pj/quanthermes_web_ui/sources/v0.8.2/hermes-web-ui-source-v0.8.2.tar.gz",
+    "https://github.com/tangledup-ai/hermes-web-ui/releases/download/v0.8.2/hermes-web-ui-source-v0.8.2.tar.gz"
+  ],
+  "sourceSha256": "fb952f90f3034e0039328c5c2ea32094d3f929c22a1b3edc63763a5f11cfed3e",
+  "sourceSize": 68547796,
+  "sourceRepoUrl": "https://github.com/tangledup-ai/hermes-web-ui"
+}
