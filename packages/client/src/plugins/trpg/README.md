@@ -5,17 +5,23 @@
 1. 打开或创建会议，在「创建会议」场景选择里直接选「跑团模式」即可。已有跑团会议直接打开，右栏会自动加载角色卡面板。
 2. 添加角色，填写角色名称、玩家/发言人/别名、公开外观及角色卡正文。可附一张 PNG/JPEG/WebP 参考图（每角色最多 5 MB），点击「保存角色卡与设定」。最多 20 个角色，名称去除包裹符后必须唯一。
 3. AI 角色抄写员接收两类资料（均为可选，至少其一）：文本描述（最多 12000 字符）与图片 / PDF（PNG / JPEG / WebP / application/pdf，最大 5 MB）。PDF 直接以原始字节走多模态通道给 LLM，不在前端做转换；图片走 canvas 缩放 + JPEG 0.88。模型需要支持 image / PDF 多模态输入，否则会在生成草稿时返回 `draftFailed`。
-   - **解析路径优先级**：
-     1. **跑团面板 LLM 配置**（顶栏「「角色抄写员 LLM」折叠块，baseUrl / apiKey / model 三项；存在 localStorage `hermes.trpg.llmConfig`）→ 直调；最优先，本地最易用
-     2. **`meeting-asr/config.json` 的 `llm.api_key`** → 直调
-     3. **Hermes Agent bridge**（默认；用请求 `X-Hermes-Profile` profile）→ 复用 agent 的模型 / 系统提示词 / 技能 / 记忆
-     4. 都没有 → 503 `llm_not_configured`
-   - **手动 LLM 覆盖**：上面 1 和 2 任一即可。面板配置（路径 1）无需 server 配置，刷新后保留在该浏览器。
-4. 使用原会议录音/ASR；点击「生成图片 Prompt」读取点击时最新 60 句已确认转写（最多 12000 字符）。临时 ASR 片段不参与。
-5. 复制生成的提示词，并下载、另附角色参考图到目标 GPT Image 生图工具。这里生成的是文本提示词，不调用或硬编码任何图像模型 ID，包括用户所称的 GPT image2.5。
-6. 保留最近 30 条高光，包含生成时间、可编辑提示词和对应 ASR 原文依据。编辑后点击保存；可删除不需要的高光。
+    - **解析路径优先级**：
+      1. **跑团面板 LLM 配置**（顶栏「「角色抄写员 LLM」折叠块，baseUrl / apiKey / model 三项；存在 localStorage `hermes.trpg.llmConfig`）→ 直调；最优先，本地最易用
+      2. **`meeting-asr/config.json` 的 `llm.api_key`** → 直调
+      3. **Hermes Agent bridge**（默认；用请求 `X-Hermes-Profile` profile）→ 复用 agent 的模型 / 系统提示词 / 技能 / 记忆
+      4. 都没有 → 503 `llm_not_configured`
+    - **手动 LLM 覆盖**：上面 1 和 2 任一即可。面板配置（路径 1）无需 server 配置，刷新后保留在该浏览器。
+    - **模型 PDF/image 拒绝 → bridge 自动回退**：直调 LLM 返回 `image_format_unsupported` 且输入是 PDF + 有 profile → server 自动改走 Hermes Agent bridge，把 PDF 解到 `${HERMES_WEB_UI_HOME}/trpg-uploads/<uuid>.pdf` 当临时文件传给 agent，agent 用 `read_file` / PDF 解析 skill 读取
+    - **agent 输出容错**：bridge 路径支持两次追问（同一 session）。如果第一轮 agent 输出的是「我先读 PDF / OCR 整理...」这种内心独白而非 JSON，server 会发一次「现在直接输出 JSON」追问，agent 用同一会话上下文继续（OCR 不用重做）。仍然失败 → `invalid_output` + 模型原始输出（前 800 字）方便排查
+    - **同义词吸收**：cleanSheet 自动把「六项属性 / 力量 / 敏捷 / DEX / AC / HP」等中文 / 缩写键名映射回 `strength / dexterity / armorClass / hpMax` 等结构化字段，避免「同一字段被填多次」的视觉重复
+4. 草稿审阅区每个 sheet 字段显示 diff：**(新) / (无变化) / (覆盖 · 原值：...)**，顶部 summary 显示「N 新增 · N 覆盖 · N 无变化」；方便多次生成时看清哪些字段会被改、哪些保持原样。点击「应用已审阅字段」会按 draft 里的非空字段合并到 card.sheet（不会清空已有字段）。
+5. 使用原会议录音/ASR；点击「生成图片 Prompt」读取点击时最新 60 句已确认转写（最多 12000 字符）。临时 ASR 片段不参与。
+6. 复制生成的提示词，并下载、另附角色参考图到目标 GPT Image 生图工具。这里生成的是文本提示词，不调用或硬编码任何图像模型 ID，包括用户所称的 GPT image2.5。
+7. 保留最近 30 条高光，包含生成时间、可编辑提示词和对应 ASR 原文依据。编辑后点击保存；可删除不需要的高光。
 
 文本生成默认走 Hermes Agent bridge（无需任何密钥配置；profile 自带模型 / 系统提示词 / 记忆 / 技能）。若用户在 `config.json` 里手填 LLM，则自动切到直调。未配置、超时、bridge 不可用、输出校验失败分别提示；不把失败伪装为成功。参考图仅用于本地预览与下载，不发送给文本模型，不自动识别图片内容。
+
+调用过程可展开「调用过程」折叠块查看：status（PDF 临时文件 / 追问触发）/ tool_call（agent 用的工具及参数摘要）/ text（模型 delta 流）/ final（最后一次成功解析的 JSON 摘要）。raw 错误文本在 trace 与 error 状态行都各展示前 800 字。
 
 ## 跑团设计
 
