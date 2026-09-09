@@ -100,7 +100,7 @@ async function generate() {
   } catch (e) {
     if (!disposed) {
       const code = (e as { code?: string }).code ?? ''
-      error.value = t(`trpg.${['llm_not_configured', 'no_highlight', 'invalid_output'].includes(code) ? code : 'generation_failed'}`)
+      error.value = t(`trpg.${['llm_not_configured', 'agent_unreachable', 'no_highlight', 'invalid_output'].includes(code) ? code : 'generation_failed'}`)
     }
   } finally { busy.value = false; stage.value = '' }
 }

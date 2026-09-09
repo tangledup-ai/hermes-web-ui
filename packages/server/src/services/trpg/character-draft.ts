@@ -2,7 +2,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { cleanSheet, SHEET_KEYS } from '../../../../shared/trpg'
-import { loadLLMConfig, type DirectLLMDeps, type LLMConfig } from '../meeting-asr/direct-llm'
+import { loadLLMConfig, resolveProfileLLMConfig, type DirectLLMDeps, type LLMConfig } from '../meeting-asr/direct-llm'
 import type { MeetingAgentBridge } from '../meeting-asr/agent-bridge'
 import { getWebUiHome } from '../../config'
 
@@ -203,9 +203,14 @@ function hasAnyField(draft: ParsedDraft): boolean {
   return [draft.name, draft.player, draft.appearance, draft.card, ...Object.values(draft.sheet)].some(v => v?.trim())
 }
 
-async function draftViaDirectLLM(input: DraftInput, deps: DirectLLMDeps): Promise<DraftResult> {
-  // 请求体里直接带的 LLM 配置（TRPG 面板里临时填的）优先于 server 端 config.json。
-  const config = input.trpgLlmConfig || await (deps.loadConfig ?? loadLLMConfig)()
+async function draftViaDirectLLM(input: DraftInput, deps: DirectLLMDeps, profile?: string): Promise<DraftResult> {
+  // 请求体里直接带的 LLM 配置（TRPG 面板里临时填的）优先于 server 端 config.json，
+  // 没有再回退到 profile 的默认模型 + 供应商凭证。都没有 → llm_not_configured。
+  // 单测场景：注入的 `deps.loadConfig` 是唯一配置源，profile fallback 跳过。
+  const config = input.trpgLlmConfig
+    || (deps.loadConfig ? await deps.loadConfig() : null)
+    || await loadLLMConfig()
+    || (profile && !deps.loadConfig ? await resolveProfileLLMConfig(profile, input.model) : null)
   if (!config) throw new Error('llm_not_configured')
   const content = input.image ? [{ type: 'text', text: input.text || '请依据图片提取角色资料。' }, { type: 'image_url', image_url: { url: input.image } }] : input.text
   const res = await (deps.fetchImpl ?? fetch)(`${config.baseUrl.replace(/\/$/, '')}/chat/completions`, {
@@ -391,11 +396,15 @@ function isPdfInput(input: DraftInput): boolean {
 
 export async function draftCharacter(input: DraftInput, profile?: string, deps: DraftDeps = {}): Promise<DraftResult> {
   // 直调 LLM 优先：用户在 config.json 里配了 LLM（api_key）就用那条路径；
-  // 否则回退到 Hermes Agent bridge（依赖用户在 profile 下训练的模型 / 系统提示词 / MCP）。
-  const config = await (deps.loadConfig ?? loadLLMConfig)()
+  // 否则回退到 profile 默认模型的供应商凭证（用户在 UI 设默认模型但没填
+  // meeting-asr/config.json 也能跑）；都没有则走 Hermes Agent bridge。
+  //
+  // 单测场景：注入的 `deps.loadConfig` 是唯一的配置源，profile fallback 关闭，
+  // 避免测试环境实际 profile 里偶然有合法配置导致走错路径。
+  const config = await resolveDirectLLMConfig(input, profile, deps)
   if (config) {
     try {
-      return await draftViaDirectLLM(input, deps)
+      return await draftViaDirectLLM(input, deps, profile)
     } catch (err) {
       // PDF + 直调模型不支持 image_url 输入 → 自动转 Hermes Agent bridge
       // （bridge 路径会把 PDF 解到临时文件，让 agent 用 read_file / PDF 解析 skill 读）。
@@ -408,4 +417,20 @@ export async function draftCharacter(input: DraftInput, profile?: string, deps: 
   }
   if (!profile) throw new Error('llm_not_configured')
   return draftViaAgentBridge(input, profile, deps)
+}
+
+async function resolveDirectLLMConfig(
+  input: DraftInput,
+  profile: string | undefined,
+  deps: DraftDeps,
+): Promise<LLMConfig | null> {
+  // 1. Request body takes precedence (local TRPG panel config).
+  if (input.trpgLlmConfig) return input.trpgLlmConfig
+  // 2. meeting-asr/config.json (legacy path) or injected `deps.loadConfig` (tests).
+  const direct = await (deps.loadConfig ?? loadLLMConfig)()
+  if (direct) return direct
+  // 3. Profile's default model + provider credentials (configured via the UI).
+  //    单测注入 `deps.loadConfig` 表示「只测这条路径」，跳过 profile fallback。
+  if (profile && !deps.loadConfig) return resolveProfileLLMConfig(profile, input.model)
+  return null
 }

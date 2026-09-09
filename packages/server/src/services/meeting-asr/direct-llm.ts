@@ -1,6 +1,9 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { logger } from '../logger'
+import { getProfileDir } from '../hermes/hermes-profile'
+import { PROVIDER_ENV_MAP, readConfigYamlForProfile } from '../config-helpers'
+import { getCompatibleCustomProviders, type NormalizedCustomProvider } from '../hermes/custom-providers-compat'
 import type { SceneTemplate } from './scene-templates'
 import { REPORT_TITLE_INSTRUCTION } from './scene-templates'
 import { prepareAnalysisSkillSection } from './skill-resolver'
@@ -81,6 +84,210 @@ export async function loadLLMConfig(dataDir?: string): Promise<LLMConfig | null>
 async function resolveConfig(deps?: DirectLLMDeps): Promise<LLMConfig | null> {
   if (deps?.loadConfig) return deps.loadConfig()
   return loadLLMConfig()
+}
+
+/**
+ * Resolve a profile's default model + provider credentials (baseUrl + apiKey).
+ *
+ * Used as a fallback when `meeting-asr/config.json` has no `llm.api_key` but
+ * the profile's `config.yaml` does have a usable provider. Returns null when
+ * the profile doesn't expose a direct LLM endpoint (custom_providers entry
+ * missing base_url / api_key / key_env), letting the caller decide whether
+ * to fall through to the Hermes Agent bridge.
+ */
+export async function resolveProfileLLMConfig(profile: string, requestedModel?: string): Promise<LLMConfig | null> {
+  if (!profile || !profile.trim()) return null
+  let config: any = null
+  try {
+    config = await readConfigYamlForProfile(profile)
+  } catch (err) {
+    logger.warn('[direct-llm] failed to read profile config for %s: %s', profile, (err as Error)?.message || err)
+    return null
+  }
+  if (!config || typeof config !== 'object') return null
+
+  // 1. Resolve the model name: explicit request → profile default.
+  const modelSection = config.model
+  const defaultModel = typeof modelSection === 'string'
+    ? modelSection.trim()
+    : String(modelSection?.default || '').trim()
+  const model = (requestedModel && requestedModel.trim()) || defaultModel
+  if (!model) return null
+
+  // 2. Resolve the provider name from model.provider if set.
+  const modelProviderName = typeof modelSection === 'object'
+    ? String(modelSection?.provider || '').trim()
+    : ''
+
+  // 3a. Custom providers in config.yaml take precedence (the user may have
+  //     intentionally shadowed a built-in name like `anthropic` with their own
+  //     baseUrl + apiKey).
+  const providers = getCompatibleCustomProviders(config)
+  const provider = pickProvider(providers, modelProviderName, model)
+  if (provider) {
+    let apiKey = (provider.api_key || '').trim()
+    if (!apiKey && provider.key_env) {
+      apiKey = await readEnvVarForProfile(profile, provider.key_env)
+    }
+    if (!apiKey) {
+      logger.warn('[direct-llm] profile %s provider %s has no api_key / key_env', profile, provider.name)
+      return null
+    }
+    return {
+      apiKey,
+      baseUrl: provider.base_url.replace(/\/+$/, ''),
+      model,
+    }
+  }
+
+  // 3b. Built-in provider (minimax-cn, deepseek, alibaba, …): credentials live
+  //     in `~/.hermes/profiles/<name>/.env` keyed by `api_key_env` /
+  //     `base_url_env` in `PROVIDER_ENV_MAP`. Use the preset base URL when env
+  //     doesn't set one. Only used when the profile doesn't already override
+  //     the provider with a custom_providers entry.
+  if (modelProviderName) {
+    const builtin = await resolveBuiltinProviderConfig(profile, modelProviderName)
+    if (builtin) return { apiKey: builtin.apiKey, baseUrl: builtin.baseUrl, model }
+  }
+
+  logger.warn('[direct-llm] profile %s has no provider matching name=%s model=%s; %d custom_providers available', profile, modelProviderName || '(none)', model, providers.length)
+  return null
+}
+
+/**
+ * Resolve credentials for a built-in provider (e.g. minimax-cn, deepseek,
+ * alibaba). Reads `api_key_env` from the profile's `.env`, falls back to
+ * `process.env`. Base URL comes from `base_url_env` if set, otherwise from
+ * the built-in preset catalog.
+ *
+ * Returns null when the provider is not a known built-in or has no usable key
+ * — letting the caller fall through to bridge / custom_providers.
+ */
+async function resolveBuiltinProviderConfig(profile: string, providerName: string): Promise<{ apiKey: string; baseUrl: string } | null> {
+  const envMap = PROVIDER_ENV_MAP[providerName]
+  if (!envMap) {
+    logger.warn('[direct-llm] builtin lookup for %s: PROVIDER_ENV_MAP has no entry', providerName)
+    return null
+  }
+  const apiKeyEnv = envMap.api_key_env
+  const baseUrlEnv = envMap.base_url_env
+  if (!apiKeyEnv && !baseUrlEnv) return null  // OAuth-only providers (e.g. minimax-oauth) — no direct path
+
+  // Ensure catalog is loaded once before the api_mode / baseUrl lookups.
+  await loadBuiltinProviderCatalog()
+
+  // Direct path uses /chat/completions. Built-in providers with a different
+  // API mode (e.g. anthropic_messages for minimax-cn) would 404 here, so
+  // let the caller fall through to the Hermes Agent bridge.
+  if (!isBuiltinProviderChatCompletions(providerName)) {
+    logger.warn('[direct-llm] builtin %s is not chat_completions (anthropic_messages); deferring to bridge', providerName)
+    return null
+  }
+
+  let apiKey = apiKeyEnv ? await readEnvVarForProfile(profile, apiKeyEnv) : ''
+  if (!apiKey && apiKeyEnv && process.env[apiKeyEnv]) apiKey = process.env[apiKeyEnv] || ''
+  if (!apiKey) {
+    logger.warn('[direct-llm] builtin %s: no api_key found in profile .env or process.env', providerName)
+    return null
+  }
+
+  let baseUrl = baseUrlEnv ? await readEnvVarForProfile(profile, baseUrlEnv) : ''
+  if (!baseUrl && baseUrlEnv && process.env[baseUrlEnv]) baseUrl = process.env[baseUrlEnv] || ''
+  if (!baseUrl) baseUrl = builtinProviderBaseUrl(providerName)
+  if (!baseUrl) {
+    logger.warn('[direct-llm] builtin %s: no base_url (env=%s, preset=%s)', providerName, baseUrlEnv || '(none)', builtinProviderBaseUrl(providerName) || '(none)')
+    return null
+  }
+
+  return { apiKey: apiKey.trim(), baseUrl: baseUrl.replace(/\/+$/, '') }
+}
+
+let builtinApiModeCache: Map<string, string> | null = null
+let builtinBaseUrlCache: Map<string, string> | null = null
+let builtinCatalogPromise: Promise<void> | null = null
+
+async function loadBuiltinProviderCatalog(): Promise<void> {
+  if (builtinApiModeCache && builtinBaseUrlCache) return
+  try {
+    const mod = await import('../../shared/providers') as { PROVIDER_PRESETS?: Array<{ value: string; base_url?: string; builtin?: boolean; api_mode?: string }> }
+    builtinApiModeCache = new Map()
+    builtinBaseUrlCache = new Map()
+    for (const p of mod.PROVIDER_PRESETS || []) {
+      if (p.builtin && p.value) {
+        builtinApiModeCache.set(p.value, p.api_mode || 'chat_completions')
+        if (p.base_url) builtinBaseUrlCache.set(p.value, p.base_url)
+      }
+    }
+  } catch (err) {
+    logger.warn('[direct-llm] failed to load builtin provider presets: %s', (err as Error)?.message || err)
+  }
+}
+
+/** Test-only: clear the cached builtin catalog so subsequent calls re-read PROVIDER_PRESETS. */
+export function _resetBuiltinProviderCatalogForTests(): void {
+  builtinApiModeCache = null
+  builtinBaseUrlCache = null
+  builtinCatalogPromise = null
+}
+
+function isBuiltinProviderChatCompletions(providerName: string): boolean {
+  // Providers without an entry default to chat_completions (legacy behaviour).
+  if (!builtinApiModeCache) return true
+  return (builtinApiModeCache.get(providerName) || 'chat_completions') === 'chat_completions'
+}
+
+function builtinProviderBaseUrl(providerName: string): string {
+  return builtinBaseUrlCache?.get(providerName) || ''
+}
+
+function pickProvider(
+  providers: NormalizedCustomProvider[],
+  preferredName: string,
+  model: string,
+): NormalizedCustomProvider | null {
+  if (!providers.length) return null
+  const want = preferredName.toLowerCase()
+  // 1. Explicit match by name / provider_key.
+  if (want) {
+    const match = providers.find(p => (p.name || '').toLowerCase() === want || (p.provider_key || '').toLowerCase() === want)
+    if (match) return match
+  }
+  // 2. Provider whose `model` matches the requested model id exactly.
+  if (model) {
+    const match = providers.find(p => (p.model || '').trim() === model)
+    if (match) return match
+  }
+  // 3. No match — don't fall through to an unrelated provider (its baseUrl /
+  //    api_key would be wrong). Caller will fall back to the bridge path.
+  return null
+}
+
+/**
+ * Look up an env var in the profile's `.env` file (KEY=VALUE per line). The
+ * file is the same one Hermes Agent reads; values may be quoted or unquoted.
+ */
+async function readEnvVarForProfile(profile: string, key: string): Promise<string> {
+  if (!key) return ''
+  const envPath = path.join(getProfileDir(profile), '.env')
+  try {
+    const text = await fs.readFile(envPath, 'utf-8')
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim()
+      if (!line || line.startsWith('#')) continue
+      const m = line.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/)
+      if (!m || m[1] !== key) continue
+        const raw = m[2]
+        // Strip wrapping quotes.
+        const stripped = raw.replace(/^["'](.*)["']$/, '$1').trim()
+        if (stripped) return stripped
+    }
+  } catch (err) {
+    const code = (err as { code?: string })?.code
+    if (code !== 'ENOENT') {
+      logger.warn('[direct-llm] failed to read %s: %s', envPath, (err as Error)?.message || err)
+    }
+  }
+  return ''
 }
 
 /**

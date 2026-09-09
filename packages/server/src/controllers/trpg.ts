@@ -12,12 +12,20 @@ export async function highlight(ctx: Context) {
   let input
   try { input = parseInput(ctx.request.body) }
   catch { ctx.status = 400; ctx.body = { code: 'invalid_input' }; return }
-  try { ctx.body = await generateHighlight(input) }
+  const profile = resolveDraftProfile(ctx)
+  try { ctx.body = await generateHighlight(input, profile) }
   catch (error) {
-    const known = ['llm_not_configured', 'no_highlight', 'invalid_output']
+    const known = ['llm_not_configured', 'agent_unreachable', 'no_highlight', 'invalid_output']
     const code = error instanceof Error && known.includes(error.message) ? error.message : 'generation_failed'
-    ctx.status = code === 'no_highlight' ? 422 : code === 'llm_not_configured' ? 503 : 502
-    ctx.body = { code }
+    ctx.status = code === 'no_highlight' ? 422
+      : code === 'llm_not_configured' || code === 'agent_unreachable' ? 503
+      : 502
+    const raw = (error as { raw?: string }).raw
+    const body: Record<string, unknown> = { code }
+    if (raw) body.raw = raw
+    ctx.body = body
+    // eslint-disable-next-line no-console
+    console.error(`[trpg.highlight] profile=${profile} code=${code} status=${ctx.status} message=${error instanceof Error ? error.message : String(error)}`)
   }
 }
 

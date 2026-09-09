@@ -8,8 +8,9 @@
     - **解析路径优先级**：
       1. **跑团面板 LLM 配置**（顶栏「「角色抄写员 LLM」折叠块，baseUrl / apiKey / model 三项；存在 localStorage `hermes.trpg.llmConfig`）→ 直调；最优先，本地最易用
       2. **`meeting-asr/config.json` 的 `llm.api_key`** → 直调
-      3. **Hermes Agent bridge**（默认；用请求 `X-Hermes-Profile` profile）→ 复用 agent 的模型 / 系统提示词 / 技能 / 记忆
-      4. 都没有 → 503 `llm_not_configured`
+      3. **profile 默认模型 + 供应商凭证**（用户在 UI 里设默认模型但没填 `meeting-asr/config.json` 也能跑）：server 从 `~/.hermes/profiles/<name>/config.yaml` 读 `model.default + model.provider`，再从同 profile 的 `custom_providers` / `providers` 找 `base_url + api_key`（或 `key_env` 引用 `.env`）
+      4. **Hermes Agent bridge**（profile 有、上面都拿不到 → 走 agent 的模型 / 系统提示词 / 技能 / 记忆）
+      5. 都没有 → 503 `llm_not_configured`
     - **手动 LLM 覆盖**：上面 1 和 2 任一即可。面板配置（路径 1）无需 server 配置，刷新后保留在该浏览器。
     - **模型 PDF/image 拒绝 → bridge 自动回退**：直调 LLM 返回 `image_format_unsupported` 且输入是 PDF + 有 profile → server 自动改走 Hermes Agent bridge，把 PDF 解到 `${HERMES_WEB_UI_HOME}/trpg-uploads/<uuid>.pdf` 当临时文件传给 agent，agent 用 `read_file` / PDF 解析 skill 读取
     - **agent 输出容错**：bridge 路径支持两次追问（同一 session）。如果第一轮 agent 输出的是「我先读 PDF / OCR 整理...」这种内心独白而非 JSON，server 会发一次「现在直接输出 JSON」追问，agent 用同一会话上下文继续（OCR 不用重做）。仍然失败 → `invalid_output` + 模型原始输出（前 800 字）方便排查
