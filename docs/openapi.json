@@ -3,7 +3,7 @@
   "info": {
     "title": "Hermes Studio API",
     "description": "Hermes Studio API — chat sessions, scheduled jobs, platform channels, model management, skills, memory, logs, file browser, group chat, and terminal.",
-"version": "0.8.6"
+    "version": "0.8.6"
   },
   "servers": [
     {
@@ -11067,6 +11067,9 @@
                   },
                   "output_path": {
                     "type": "string"
+                  },
+                  "return_base64": {
+                    "type": "string"
                   }
                 }
               }
@@ -11097,33 +11100,6 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "duration": {
-                    "type": "string"
-                  },
-                  "output_path": {
-                    "type": "string"
-                  },
-                  "prompt": {
-                    "type": "string"
-                  },
-                  "timeout_ms": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "prompt"
-                ]
-              }
-            }
           }
         }
       }
@@ -11201,10 +11177,16 @@
                   "resolution": {
                     "type": "string"
                   },
+                  "return_base64": {
+                    "type": "boolean"
+                  },
                   "timeout_ms": {
                     "type": "number"
                   }
-                }
+                },
+                "required": [
+                  "prompt"
+                ]
               }
             }
           }

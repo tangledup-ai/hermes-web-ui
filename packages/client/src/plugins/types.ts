@@ -1,4 +1,4 @@
-import type { App } from 'vue'
+import type { App, Component } from 'vue'
 import type { Router, RouteRecordRaw } from 'vue-router'
 import type { I18n } from 'vue-i18n'
 
@@ -33,7 +33,40 @@ export interface PluginSidebarItem {
   iconPath?: string
 }
 
+export interface MeetingPanelContribution {
+  preferredWidth?: string
+  id: string
+  labelKey: string
+  component: Component
+}
+
+/**
+ * 插件贡献的会议场景模板（出现在创建会议 picker 里）。
+ *
+ * 与 `MeetingPanelContribution` 的区别：场景模板只在「创建会议」对话框里
+ * 让用户选择一次；会议开启后场景本身由后端 sceneTemplate 字符串识别，
+ * 插件的运行时 UI（角色卡、高光面板等）仍走 `addMeetingPanel()`。
+ *
+ * `id` 唯一且不能与内置 6 个 SceneId 重名；服务端对未知 id 走通用 prompt 回退，
+ * 无需在 server scene-templates 注册。
+ */
+export interface SceneTemplateContribution {
+  id: string
+  /** 卡片标题 i18n key；插件需同时通过 addI18nMessages 注册。 */
+  labelKey: string
+  /** 卡片副标题 i18n key；插件需同时通过 addI18nMessages 注册。 */
+  descriptionKey: string
+  /** 内联 SVG 子内容（path/polygon/line 等；不含外层 <svg> 标签），与现有 24×24 风格一致。 */
+  iconSvg: string
+}
+
 export interface PluginContext {
+  addMeetingPanel(panel: MeetingPanelContribution): void
+  /**
+   * 贡献一个会议场景模板；出现在创建会议对话框的 SceneTemplatePicker。
+   * 重复 id 静默忽略；install 期间调用一次。
+   */
+  addSceneTemplate(scene: SceneTemplateContribution): void
   /** Vue app 实例，插件可注册全局组件 / directive。 */
   app: App
   /** Vue Router 实例，插件 addRoute() 走它。 */

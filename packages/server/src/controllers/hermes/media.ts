@@ -563,7 +563,7 @@ async function requestApiKeyImage(
         size: body.size || '1024x1024',
         quality: body.quality || 'auto',
         stream: true,
-        response_format: 'b64_json',
+        ...(body.return_base64 === true ? { output_format: 'png' } : { response_format: 'b64_json' }),
       }),
     })
   } else if (mode === 'image') {
@@ -593,18 +593,37 @@ async function requestApiKeyImage(
       }),
     })
   } else {
-    const image = await normalizeImageFile(body)
-    const imageBytes = new Uint8Array(image.buffer.byteLength)
-    imageBytes.set(image.buffer)
     const form = new FormData()
-    form.append('image', new Blob([imageBytes.buffer], { type: image.mime }), image.name)
+    if (body.reference_images !== undefined) {
+      const refs = body.reference_images
+      if (!Array.isArray(refs) || refs.length < 1 || refs.length > 4) {
+        throw Object.assign(new Error('Use 1 to 4 reference images'), { status: 400 })
+      }
+      let total = 0
+      for (const [index, uri] of refs.entries()) {
+        if (typeof uri !== 'string' || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(uri)) {
+          throw Object.assign(new Error('Reference images must be PNG, JPEG or WebP data URIs'), { status: 400 })
+        }
+        assertImageSize(uri.slice(uri.indexOf(',') + 1), 5 * 1024 * 1024)
+        const image = imageDataUriToBytes(uri)
+        total += image.buffer.byteLength
+        if (total > 10 * 1024 * 1024 || mimeFromMagic(image.buffer) !== image.mime) {
+          throw Object.assign(new Error('Invalid reference image or reference size limit exceeded'), { status: 400 })
+        }
+        form.append('image[]', new Blob([new Uint8Array(image.buffer)], { type: image.mime }), `reference-${index + 1}.${image.mime === 'image/jpeg' ? 'jpg' : image.mime.split('/')[1]}`)
+      }
+    } else {
+      const image = await normalizeImageFile(body)
+      form.append('image', new Blob([new Uint8Array(image.buffer)], { type: image.mime }), image.name)
+    }
     form.append('prompt', prompt)
     form.append('model', body.model || models.generation || APIKEY_IMAGE_MODEL)
     form.append('n', String(n))
     form.append('quality', body.quality || 'auto')
     form.append('size', body.size || '1024x1024')
     form.append('stream', 'true')
-    form.append('response_format', 'b64_json')
+    if (body.return_base64 === true) form.append('output_format', 'png')
+    else form.append('response_format', 'b64_json')
     res = await fetch(buildApiUrl(provider.baseUrl, '/v1/images/edits'), {
       method: 'POST',
       headers,
@@ -668,7 +687,7 @@ export async function apiKeyImageGenerate(ctx: Context) {
     const providerName = requestedApiKeyImageProviderName(body)
     const resolution = resolveApiKeyImageProvider(hermesConfig, providerName, configuredProvider)
     if (!resolution.provider) {
-      ctx.status = 401
+      ctx.status = body.return_base64 === true ? 503 : 401
       const isDefaultProvider = canonicalCustomProviderName(resolution.attemptedName) === APIKEY_IMAGE_PROVIDER
       ctx.body = {
         error: `Missing ${resolution.attemptedName} provider in profile "${profile}" config.yaml.`,
@@ -685,6 +704,11 @@ export async function apiKeyImageGenerate(ctx: Context) {
       { generation: generationSettings.model, edit: editSettings.model },
       activeSettings.timeoutMs,
     )
+    // Browser plugins persist binary images in their own IndexedDB store.
+    if (body.return_base64 === true) {
+      ctx.body = { ok: true, images, provider: provider.name, profile }
+      return
+    }
     const requestedOutputPath = typeof body.output_path === 'string' ? body.output_path.trim() : ''
     const outputPaths = saveGeneratedImages(images, requestedOutputPath || undefined)
     ctx.body = {
@@ -864,6 +888,9 @@ export async function miniMaxImageToVideo(ctx: Context) {
       region?: string
       output_path?: string
       timeout_ms?: number
+      // Accepted for parity with apiKeyImageGenerate, but unsupported here:
+      // image-to-video never returns binary image payloads.
+      return_base64?: boolean
     } | undefined
     const body = input || {}
     const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : MINIMAX_VIDEO_DEFAULT_MODEL
@@ -890,6 +917,15 @@ export async function miniMaxImageToVideo(ctx: Context) {
     const timeoutMs = Number.isFinite(rawTimeoutMs)
       ? Math.max(10000, Math.min(rawTimeoutMs, 30 * 60 * 1000))
       : DEFAULT_TIMEOUT_MS
+    // Video endpoints never produce binary image payloads; the return_base64
+    // shortcut only applies to apiKeyImageGenerate (where images / provider
+    // are in scope). Reject explicitly so plugins don't accidentally depend
+    // on a payload that never existed.
+    if (body.return_base64 === true) {
+      ctx.status = 400
+      ctx.body = { error: 'return_base64 is not supported on image-to-video endpoints', code: 'return_base64_unsupported' }
+      return
+    }
     const requestedOutputPath = typeof body.output_path === 'string' ? body.output_path.trim() : ''
     const requestBody = miniMaxV1ImageRequest(body, prompt, image, model, region)
 
@@ -991,6 +1027,15 @@ export async function grokImageToVideo(ctx: Context) {
     const timeoutMs = Number.isFinite(rawTimeoutMs)
       ? Math.max(10000, Math.min(rawTimeoutMs, 30 * 60 * 1000))
       : DEFAULT_TIMEOUT_MS
+    // Video endpoints never produce binary image payloads; the return_base64
+    // shortcut only applies to apiKeyImageGenerate (where images / provider
+    // are in scope). Reject explicitly so plugins don't accidentally depend
+    // on a payload that never existed.
+    if (body.return_base64 === true) {
+      ctx.status = 400
+      ctx.body = { error: 'return_base64 is not supported on image-to-video endpoints', code: 'return_base64_unsupported' }
+      return
+    }
     const requestedOutputPath = typeof body.output_path === 'string' ? body.output_path.trim() : ''
 
     const started = await requestXaiJson(XAI_VIDEO_GENERATIONS_URL, tokenInfo.token, {

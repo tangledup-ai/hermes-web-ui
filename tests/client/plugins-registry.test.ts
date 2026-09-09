@@ -4,6 +4,7 @@ import {
   _resetForTesting,
   installClientPlugins,
   listSidebarItems,
+  sceneTemplateContributions,
 } from '../../packages/client/src/plugins/registry'
 import {
   PLUGIN_STATE_STORAGE_KEY,
@@ -143,6 +144,51 @@ describe('plugin registry', () => {
     if (typeof localStorage === 'undefined') return
     localStorage.setItem(PLUGIN_STATE_STORAGE_KEY, 'not-json')
     expect(readPluginEnabledMap()).toEqual({})
+  })
+
+  it('addSceneTemplate registers and dedupes by id across plugins and HMR', async () => {
+    const pluginA = makeStubPlugin('plugin-a', {
+      install: vi.fn((ctx) => ctx.addSceneTemplate({
+        id: 'trpg',
+        labelKey: 'trpg.sceneLabel',
+        descriptionKey: 'trpg.sceneDesc',
+        iconSvg: '<polygon points="12,2 22,9 18.5,20 5.5,20 2,9"/>',
+      })),
+    })
+    const pluginB = makeStubPlugin('plugin-b', {
+      install: vi.fn((ctx) => ctx.addSceneTemplate({
+        id: 'trpg',
+        labelKey: 'trpg.sceneLabel',
+        descriptionKey: 'trpg.sceneDesc',
+        iconSvg: '<polygon points="12,2 22,9 18.5,20 5.5,20 2,9"/>',
+      })),
+    })
+    await installClientPlugins({} as any, makeFakeRouter() as any, makeFakeI18n() as any, [
+      { plugin: pluginA, enabledByDefault: true },
+      { plugin: pluginB, enabledByDefault: true },
+    ])
+    expect(sceneTemplateContributions.map(s => s.id)).toEqual(['trpg'])
+    // HMR-safe: reinstalling the same plugin does not push a duplicate
+    await installClientPlugins({} as any, makeFakeRouter() as any, makeFakeI18n() as any, [
+      { plugin: pluginA, enabledByDefault: true },
+    ])
+    expect(sceneTemplateContributions).toHaveLength(1)
+  })
+
+  it('addSceneTemplate is skipped when the plugin is disabled', async () => {
+    const plugin = makeStubPlugin('plugin', {
+      install: vi.fn((ctx) => ctx.addSceneTemplate({
+        id: 'plugin-scene',
+        labelKey: 'plugin.sceneLabel',
+        descriptionKey: 'plugin.sceneDesc',
+        iconSvg: '<circle cx="12" cy="12" r="10"/>',
+      })),
+    })
+    writePluginEnabledMap({ plugin: false })
+    await installClientPlugins({} as any, makeFakeRouter() as any, makeFakeI18n() as any, [
+      { plugin, enabledByDefault: true },
+    ])
+    expect(sceneTemplateContributions).toHaveLength(0)
   })
 })
 

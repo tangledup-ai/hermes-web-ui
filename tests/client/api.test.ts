@@ -167,6 +167,25 @@ describe('API Client', () => {
       await expect(request('/api/hermes/sessions')).rejects.toThrow('API Error 500: Internal Server Error')
     })
 
+    it('propagates raw field from JSON error body for diagnostics', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: () => Promise.resolve(JSON.stringify({
+          code: 'invalid_output',
+          message: 'invalid_output',
+          raw: 'I cannot parse this PDF into JSON.',
+        })),
+      })
+      try {
+        await request('/api/plugins/trpg/character-draft')
+        expect.fail('should have thrown')
+      } catch (err) {
+        expect((err as Error & { code?: string; raw?: string }).code).toBe('invalid_output')
+        expect((err as Error & { code?: string; raw?: string }).raw).toBe('I cannot parse this PDF into JSON.')
+      }
+    })
+
     it('extracts nested JSON error messages instead of stringifying objects', async () => {
       mockFetch.mockResolvedValue({
         ok: false,

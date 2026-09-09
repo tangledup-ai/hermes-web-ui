@@ -1,12 +1,18 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+beforeEach(() => setActivePinia(createPinia()))
+
 import { mount } from '@vue/test-utils'
+import { defineComponent, h } from 'vue'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({ t: (key: string) => key }),
 }))
 
 import MeetingRightPanel from '@/components/hermes/meeting/MeetingRightPanel.vue'
+import { useMeetingStore } from '@/stores/hermes/meeting'
+import { _resetForTesting, meetingPanels } from '@/plugins/registry'
 
 /**
  * Right-panel shell: header + resize handle + 4-slot dispatch.
@@ -20,6 +26,7 @@ import MeetingRightPanel from '@/components/hermes/meeting/MeetingRightPanel.vue
  * - resize-start emit with pointer event
  * - toolbar slot presence (analysis only)
  * - dispatch: which slot is mounted
+ * - scene→plugin auto-bind (sceneTemplate matching a plugin id selects that plugin)
  */
 describe('MeetingRightPanel', () => {
   const baseProps = {
@@ -28,6 +35,14 @@ describe('MeetingRightPanel', () => {
     showAgentPanel: false,
     resizeStyle: { width: '360px' },
   }
+
+  beforeEach(() => {
+    _resetForTesting()
+  })
+
+  afterEach(() => {
+    _resetForTesting()
+  })
 
   it('renders nothing when visible=false', () => {
     const wrapper = mount(MeetingRightPanel, {
@@ -200,5 +215,42 @@ describe('MeetingRightPanel', () => {
     })
     const aside = wrapper.find('.right-panel')
     expect((aside.element as HTMLElement).style.width).toBe('420px')
+  })
+
+  it('auto-selects the plugin whose id matches the active session sceneTemplate', () => {
+    const stub = defineComponent({ name: 'TrpgStub', render: () => h('div', { class: 'plugin-marker' }, 'plugin-body') })
+    meetingPanels.push({ id: 'trpg', labelKey: 'trpg.title', component: stub as any })
+
+    const store = useMeetingStore()
+    const session = store.createSession({ title: 'TRPG run', sceneTemplate: 'trpg' })
+    expect(store.activeSession?.id).toBe(session.id)
+
+    const wrapper = mount(MeetingRightPanel, { props: baseProps })
+    expect(wrapper.find('h2').text()).toBe('trpg.title')
+    expect(wrapper.find('.plugin-marker').exists()).toBe(true)
+    expect(wrapper.find('.analysis-marker').exists()).toBe(false)
+  })
+
+  it('does not render a manual plugin dropdown even when plugins are installed', () => {
+    const stub = defineComponent({ name: 'TrpgStub', render: () => h('div', { class: 'plugin-marker' }, 'plugin-body') })
+    meetingPanels.push({ id: 'trpg', labelKey: 'trpg.title', component: stub as any })
+
+    const store = useMeetingStore()
+    store.createSession({ title: 'TRPG run', sceneTemplate: 'trpg' })
+
+    const wrapper = mount(MeetingRightPanel, { props: baseProps })
+    expect(wrapper.find('select').exists()).toBe(false)
+  })
+
+  it('falls back to analysis when sceneTemplate matches no installed plugin', () => {
+    const store = useMeetingStore()
+    store.createSession({ title: 'general', sceneTemplate: 'general' })
+
+    const wrapper = mount(MeetingRightPanel, {
+      props: baseProps,
+      slots: { analysis: '<div class="analysis-marker">analysis-body</div>' },
+    })
+    expect(wrapper.find('h2').text()).toBe('meeting.analysis')
+    expect(wrapper.find('.analysis-marker').exists()).toBe(true)
   })
 })

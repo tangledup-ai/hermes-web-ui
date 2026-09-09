@@ -17,10 +17,12 @@ import type { PluginRegistration } from './types'
  */
 
 // 内置插件 import 区（按字母序排列）
+import trpgPlugin from './trpg'
 import scannerPlugin from './scanner'
 import gradingPlugin from './grading'
 
 export const BUILTIN_PLUGINS: PluginRegistration[] = [
+  { plugin: trpgPlugin, enabledByDefault: true },
   {
     plugin: scannerPlugin,
     /** 默认启用；用户可在 localStorage `hermes.plugins.enabled` 关闭。 */

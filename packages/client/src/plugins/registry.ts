@@ -1,4 +1,4 @@
-import type { App } from 'vue'
+import { shallowReactive, markRaw, type App } from 'vue'
 import type { Router } from 'vue-router'
 
 /**
@@ -18,6 +18,7 @@ import {
   type PluginContext,
   type PluginRegistration,
   type PluginSidebarItem,
+  type SceneTemplateContribution,
   type SupportedLocale,
 } from './types'
 
@@ -36,11 +37,25 @@ import {
  * 模块）；把 localStorage 的开关关掉 = 运行时下线。
  */
 
+export const meetingPanels = shallowReactive<import('./types').MeetingPanelContribution[]>([])
+
+/**
+ * 插件贡献的会议场景模板。SceneTemplatePicker 同时读取核心 6 个与本列表。
+ * 写入方只有插件 install 路径；服务端对未知 id 走通用 prompt 回退。
+ */
+export const sceneTemplateContributions = shallowReactive<SceneTemplateContribution[]>([])
+
 const sidebarItemsByRoute = new Map<string, PluginSidebarItem>()
 let installedPlugins = new Set<string>()
 
 function createContext(app: App, router: Router, i18n: PluginI18n): PluginContext {
   return {
+    addMeetingPanel(panel) {
+      if (!meetingPanels.some(p => p.id === panel.id)) meetingPanels.push({ ...panel, component: markRaw(panel.component) })
+    },
+    addSceneTemplate(scene) {
+      if (!sceneTemplateContributions.some(s => s.id === scene.id)) sceneTemplateContributions.push({ ...scene })
+    },
     app,
     router,
     i18n: i18n as unknown as PluginContext['i18n'],
@@ -113,6 +128,8 @@ export function listSidebarItems(): PluginSidebarItem[] {
  * @internal
  */
 export function _resetForTesting(): void {
+  meetingPanels.splice(0)
+  sceneTemplateContributions.splice(0)
   sidebarItemsByRoute.clear()
   installedPlugins = new Set()
 }
@@ -122,5 +139,6 @@ export type {
   PluginContext,
   PluginRegistration,
   PluginSidebarItem,
+  SceneTemplateContribution,
   SupportedLocale,
 }

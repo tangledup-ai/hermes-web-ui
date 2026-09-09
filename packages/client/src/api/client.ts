@@ -173,14 +173,17 @@ function responseErrorMessage(text: string, statusText: string): string {
   }
 }
 
-function responseErrorCode(text: string): string | undefined {
+function responseErrorPayload(text: string): { code?: string; raw?: string } {
   const trimmed = text.trim()
-  if (!trimmed) return undefined
+  if (!trimmed) return {}
   try {
-    const parsed = JSON.parse(trimmed) as { code?: unknown }
-    return typeof parsed?.code === 'string' && parsed.code ? parsed.code : undefined
+    const parsed = JSON.parse(trimmed) as { code?: unknown; raw?: unknown; message?: unknown }
+    const out: { code?: string; raw?: string } = {}
+    if (typeof parsed.code === 'string' && parsed.code) out.code = parsed.code
+    if (typeof parsed.raw === 'string') out.raw = parsed.raw
+    return out
   } catch {
-    return undefined
+    return {}
   }
 }
 
@@ -235,9 +238,10 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
         emitAuthNotice('forbidden')
       }
     }
+    const payload = responseErrorPayload(text)
     throw Object.assign(
       new Error(`API Error ${res.status}: ${responseErrorMessage(text, res.statusText)}`),
-      { status: res.status, code: responseErrorCode(text) },
+      { status: res.status, code: payload.code, ...(payload.raw !== undefined ? { raw: payload.raw } : {}) },
     )
   }
 

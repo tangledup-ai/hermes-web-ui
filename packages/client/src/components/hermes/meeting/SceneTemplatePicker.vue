@@ -1,25 +1,31 @@
 <script setup lang="ts">
 // 场景模板卡片选择器（新建会议对话框用）
 //
-// 6 个场景卡片：图标 + 标题 + 一句话描述。选中态用主题 accent 高亮。
+// 6 个内置场景卡片 + 任意数量的插件贡献场景。插件通过 PluginContext.addSceneTemplate()
+// 注册（sceneTemplateContributions），与核心场景同处一卡片网格，选中态一致。
+// 服务端对未知 sceneTemplate 走通用 prompt 回退（getSceneTemplateOrDefault），
+// 因此插件贡献的场景无需在 server scene-templates 注册。
 // speech（演讲评分）为 Toastmasters 风格场景：计时/赘语/增量评分；medical/legal/interview 目前渲染占位布局，
 // 但在这里都是可选项——用户选了就按该模板新建会议。
 
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { SCENE_IDS, type SceneId } from './scene-templates'
+import { sceneTemplateContributions } from '@/plugins/registry'
 
 const props = defineProps<{
-  modelValue: SceneId
+  // 插件可能贡献任意字符串 id；核心 6 个 id 是 SceneId 子集。
+  modelValue: string
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:modelValue', value: SceneId): void
+  (e: 'update:modelValue', value: string): void
 }>()
 
 const { t } = useI18n()
 
-// 每个模板一个简单 inline SVG（24×24 stroke 风格，跟随 currentColor）
-const TEMPLATE_ICONS: Record<SceneId, string> = {
+// 每个核心模板一个简单 inline SVG（24×24 stroke 风格，跟随 currentColor）
+const CORE_TEMPLATE_ICONS: Record<SceneId, string> = {
   general: `
     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>`,
   business: `
@@ -41,11 +47,33 @@ const TEMPLATE_ICONS: Record<SceneId, string> = {
     <line x1="8" y1="23" x2="16" y2="23"/>`,
 }
 
-function isSelected(id: SceneId): boolean {
+interface PickerEntry {
+  id: string
+  icon: string
+  labelKey: string
+  descriptionKey: string
+}
+
+const entries = computed<PickerEntry[]>(() => [
+  ...SCENE_IDS.map(id => ({
+    id,
+    icon: CORE_TEMPLATE_ICONS[id],
+    labelKey: `meeting.scene.${id}`,
+    descriptionKey: `meeting.scene.${id}Desc`,
+  })),
+  ...sceneTemplateContributions.map(s => ({
+    id: s.id,
+    icon: s.iconSvg,
+    labelKey: s.labelKey,
+    descriptionKey: s.descriptionKey,
+  })),
+])
+
+function isSelected(id: string): boolean {
   return props.modelValue === id
 }
 
-function select(id: SceneId) {
+function select(id: string) {
   if (id !== props.modelValue) {
     emit('update:modelValue', id)
   }
@@ -55,14 +83,14 @@ function select(id: SceneId) {
 <template>
   <div class="scene-template-picker" role="radiogroup" :aria-label="t('meeting.scene.label')">
     <button
-      v-for="id in SCENE_IDS"
-      :key="id"
+      v-for="entry in entries"
+      :key="entry.id"
       type="button"
       role="radio"
       class="scene-template-picker__card"
-      :class="{ 'scene-template-picker__card--selected': isSelected(id) }"
-      :aria-checked="isSelected(id)"
-      @click="select(id)"
+      :class="{ 'scene-template-picker__card--selected': isSelected(entry.id) }"
+      :aria-checked="isSelected(entry.id)"
+      @click="select(entry.id)"
     >
       <span class="scene-template-picker__icon" aria-hidden="true">
         <svg
@@ -74,11 +102,11 @@ function select(id: SceneId) {
           stroke-width="1.8"
           stroke-linecap="round"
           stroke-linejoin="round"
-          v-html="TEMPLATE_ICONS[id]"
+          v-html="entry.icon"
         />
       </span>
-      <span class="scene-template-picker__name">{{ t(`meeting.scene.${id}`) }}</span>
-      <span class="scene-template-picker__desc">{{ t(`meeting.scene.${id}Desc`) }}</span>
+      <span class="scene-template-picker__name">{{ t(entry.labelKey) }}</span>
+      <span class="scene-template-picker__desc">{{ t(entry.descriptionKey) }}</span>
     </button>
   </div>
 </template>
