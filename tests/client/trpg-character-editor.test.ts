@@ -113,7 +113,7 @@ describe('CharacterEditor draft button', () => {
     expect(wrapper.find('.ai-workshop .status-line.error').text()).toContain('trpg.agent_unreachable')
   })
 
-  it('appends the server message after the i18n key when present', async () => {
+  it('shows one localized error without duplicating the server message', async () => {
     vi.mocked(request).mockRejectedValueOnce(Object.assign(new Error('API Error 502: Profile "x" does not exist'), { code: 'generation_failed' }))
     const wrapper = mountEditor()
     const textarea = wrapper.find('textarea[aria-label="trpg.sourceText"]')
@@ -124,7 +124,7 @@ describe('CharacterEditor draft button', () => {
     await nextTick()
     const text = wrapper.find('.ai-workshop .status-line.error').text()
     expect(text).toContain('trpg.draftFailed')
-    expect(text).toContain('Profile "x" does not exist')
+    expect(text).not.toContain('Profile "x" does not exist')
   })
 
   it('renders a diff summary in the draft review with new / overwrite / unchanged counts', async () => {

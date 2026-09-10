@@ -141,7 +141,7 @@ function isHermesWorkerBackedSession(session?: { source?: string | null; agent?:
   const source = session?.source || undefined
   // "api_server" is a legacy/default source value; Hermes sessions still use worker-backed runtime.
   // coding_agent runs have a separate lifecycle.
-  if (!source || source === 'cli' || source === 'api_server') return true
+  if (!source || source === 'trpg_recap' || source === 'cli' || source === 'api_server') return true
   if (source === 'workflow' || source === 'group_chat') {
     const agent = String(session?.agent || '').trim()
 return agent !== 'claude' && agent !== 'codex' && agent !== 'deepseek' && agent !== 'pi' && agent !== 'ekko-agent' && !session?.agent_session_id
@@ -152,7 +152,7 @@ return agent !== 'claude' && agent !== 'codex' && agent !== 'deepseek' && agent 
 }
 
 function isBridgeRunSource(source?: string): boolean {
-  return source === 'cli' || source === 'global_agent' || source === 'workflow' || source === 'group_chat'
+  return source === 'trpg_recap' || source === 'cli' || source === 'global_agent' || source === 'workflow' || source === 'group_chat'
 }
 
 export async function ensureBridgeReadyForChatRun(): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -1299,7 +1299,7 @@ export class ChatRunSocket {
       state.runId = runId
       state.activeRunMarker = undefined
       state.profile = profile
-      state.source = source === 'global_agent'
+      state.source = source === 'trpg_recap' ? 'trpg_recap' : source === 'global_agent'
         ? 'global_agent'
         : source === 'group_chat'
           ? 'group_chat'
@@ -1387,7 +1387,7 @@ export class ChatRunSocket {
     if (activeAgent === 'claude-code' || activeAgent === 'codex' || activeAgent === 'pi') return activeAgent
     if (activeAgent !== 'bridge') return null
     if (state.source === 'coding_agent') return null
-    return state.source === 'cli' || state.source === 'global_agent' ? 'hermes' : null
+    return state.source === 'trpg_recap' || state.source === 'cli' || state.source === 'global_agent' ? 'hermes' : null
   }
 
   private emitQueueInsertionUpdate(

@@ -187,7 +187,7 @@ export interface BridgeContextState {
   workspace?: string
 }
 
-export type ChatRunSource = 'api_server' | 'cli' | 'coding_agent' | 'global_agent' | 'workflow' | 'group_chat'
+export type ChatRunSource = 'api_server' | 'cli' | 'coding_agent' | 'global_agent' | 'workflow' | 'group_chat' | 'trpg_recap'
 export type ChatCodingAgentId = 'claude-code' | 'codex' | 'dsh' | 'pi' | 'ekko-agent'
 
 export interface BridgeCompressionResult {

@@ -10,7 +10,7 @@ const DEFAULT_PORT = process.env.HERMES_WEB_UI_PORT || process.env.PORT || '8648
 const DEFAULT_BASE_URL = `http://127.0.0.1:${DEFAULT_PORT}`
 const DISPLAY_COMMAND = 'hermes-studio-mcp'
 const SERVER_NAME = process.env.HERMES_MCP_SERVER_NAME || DISPLAY_COMMAND
-const TOOLSETS = new Set(['api', 'browser', 'devices', 'use'])
+const TOOLSETS = new Set(['api', 'browser', 'devices', 'use', 'meetings'])
 const ALLOWED_PUBLIC_REQUEST_HEADERS = new Set([
   'accept',
   'accept-language',
@@ -45,7 +45,7 @@ function printHelp() {
 Hermes Studio MCP stdio server.
 
 Usage:
-  ${DISPLAY_COMMAND} [api|browser|devices|use]
+  ${DISPLAY_COMMAND} [api|browser|devices|use|meetings]
   ${DISPLAY_COMMAND} --help
   ${DISPLAY_COMMAND} --version
 
@@ -882,7 +882,14 @@ const gradingTools = {
   rotate: { description: 'Rotate the stored scan image 90° so it faces forward before grading. Clears OCR/questions/results/annotations (they were computed on the old orientation); re-run grading_ocr afterwards.', fields: { direction: { type: 'string', enum: ['right', 'left'] } }, required: ['scanId'] },
 }
 
+const meetingTools = {
+  list: { description: 'List available meeting IDs.', fields: {}, required: [] },
+  get: { description: 'Read meeting metadata without transcript.', fields: { meetingId: { type: 'string' } }, required: ['meetingId'] },
+  transcript_get: { description: 'Read ASR sentences. For a recap, pass requestId to read its immutable snapshot. Continue with nextCursor until null.', fields: { meetingId: { type: 'string' }, requestId: { type: 'string' }, cursor: { type: 'integer', minimum: 0 } }, required: ['meetingId'] },
+  recap_save: { description: 'Save a recap against its prepared requestId. Each chapter needs title, verbatim startQuote/endQuote, body (max 1800 chars), highlights (characterId/action/evidence). Body needs title, chapters, timeline (time/text). Retries replace the same recap.', fields: { meetingId: { type: 'string' }, requestId: { type: 'string' }, title: { type: 'string' }, chapters: { type: 'array', items: { type: 'object' } }, timeline: { type: 'array', items: { type: 'object' } } }, required: ['meetingId', 'requestId', 'title', 'chapters', 'timeline'] },
+}
 const tools = [
+  ...Object.entries(meetingTools).map(([name, spec]) => ({ name: `hermes_studio_meetings_${name}`, toolset: 'meetings', description: spec.description, inputSchema: inputSchema(spec.fields, spec.required) })),
   ...Object.entries(gradingTools).map(([action, spec]) => ({ name: `grading_${action}`, toolset: 'api', description: spec.description, inputSchema: { type: 'object', properties: { scanId: { type: 'string' }, profile: { type: 'string' }, ...spec.fields }, required: spec.required, additionalProperties: false } })),
   {
     name: 'hermes_studio_browser_tabs',
@@ -1679,6 +1686,11 @@ const TOOL_ALIASES = new Map([
 ])
 
 const CATEGORY_TOOLSETS = {
+  meetings: {
+    name: 'hermes_studio_meetings_toolset',
+    coverage: 'Meeting metadata, ASR transcript snapshots and TRPG recap saving.',
+    description: 'Access meetings and save adventure chronicles. Use action=list for operations, action=describe for schemas, action=call with the exact tool name and arguments. Read all transcript pages before writing; recap_save requires a requestId from the TRPG UI.',
+  },
   browser: {
     name: 'hermes_studio_browser_toolset',
     coverage: 'Hermes Studio Desktop browser tabs and leases; HTTP/HTTPS navigation; accessibility snapshots with stable refs; click, type, key press, and scroll interaction; viewport or full-page screenshots; bounded console log read and clear.',
@@ -1888,6 +1900,16 @@ async function callTool(name, args = {}) {
     }
     case 'hermes_studio_browser_console':
       return jsonText(await browserRequest(args.action === 'clear' ? 'console.clear' : 'console.read', { tab_id: args.tab_id }))
+    case 'hermes_studio_meetings_list':
+      return jsonText(await request('/api/meeting-storage', withAuthArgs(args)))
+    case 'hermes_studio_meetings_get': {
+      const { sentences, ...metadata } = await request(`/api/meeting-storage/${encodeURIComponent(args.meetingId)}`, withAuthArgs(args))
+      return jsonText(metadata)
+    }
+    case 'hermes_studio_meetings_transcript_get':
+      return jsonText(await request(appendQuery(`/api/meeting-storage/${encodeURIComponent(args.meetingId)}/transcript`, { requestId: args.requestId, cursor: args.cursor }), withAuthArgs(args)))
+    case 'hermes_studio_meetings_recap_save':
+      return jsonText(await request(`/api/meeting-storage/${encodeURIComponent(args.meetingId)}/recaps`, withAuthArgs(args, { method: 'PUT', body: pickDefined(args, ['requestId', 'title', 'chapters', 'timeline']) })))
     case 'hermes_studio_api_openapi_get':
       return jsonText(compactOpenApiDocument(await openApiDocument(withAuthArgs(args)), args))
     case 'hermes_studio_api_request': {

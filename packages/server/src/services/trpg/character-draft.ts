@@ -1,3 +1,4 @@
+import { parseDraftJson, responseText } from './draft-parser'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -121,84 +122,6 @@ function looksLikeImageFormatError(raw: string): boolean {
   return IMAGE_FORMAT_ERROR_PATTERNS.some(p => p.test(raw))
 }
 
-function parseDraftJson(raw: string): ParsedDraft | null {
-  if (!raw) return null
-  let text = raw.trim()
-  // 1. 整段解析（模型严格遵守「只输出 JSON」时）。
-  let result = tryParseJsonObject(text)
-  // 2. 最后一个平衡的 {...}（叙事文本后面跟 JSON 的常见形态，比如 agent 先说
-  // 「Now let me compile the character」然后输出 {...}）。
-  if (!result) {
-    const balanced = findLastBalancedJsonObject(text)
-    if (balanced) result = tryParseJsonObject(balanced)
-  }
-  // 3. 逐个尝试所有平衡的 {...}，挑第一个符合预期 schema（包含 sheet 或 name）的。
-  if (!result) {
-    for (const candidate of findAllBalancedJsonObjects(text)) {
-      const parsed = tryParseJsonObject(candidate)
-      if (parsed && (parsed.sheet !== undefined || parsed.name !== undefined || parsed.appearance !== undefined)) {
-        result = parsed
-        break
-      }
-    }
-  }
-  if (!result) return null
-  const field = (key: string, max: number) => typeof result[key] === 'string' ? result[key].slice(0, max) : ''
-  return {
-    name: field('name', 80),
-    player: field('player', 100),
-    appearance: field('appearance', 2000),
-    card: field('card', 6000),
-    sheet: cleanSheet(result.sheet),
-  }
-}
-
-/** Return every balanced top-level `{...}` substring in source order. */
-function findAllBalancedJsonObjects(text: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let start = -1
-  let inString = false
-  let escape = false
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (escape) { escape = false; continue }
-    if (c === '\\' && inString) { escape = true; continue }
-    if (c === '"') { inString = !inString; continue }
-    if (inString) continue
-    if (c === '{') {
-      if (depth === 0) start = i
-      depth++
-    } else if (c === '}') {
-      if (depth === 0) continue
-      depth--
-      if (depth === 0 && start !== -1) {
-        out.push(text.slice(start, i + 1))
-        start = -1
-      }
-    }
-  }
-  return out
-}
-
-/** Return the last balanced `{...}` substring, or null. */
-function findLastBalancedJsonObject(text: string): string | null {
-  const all = findAllBalancedJsonObjects(text)
-  return all.length ? all[all.length - 1] : null
-}
-
-function tryParseJsonObject(text: string): any | null {
-  const candidates = [text, text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()]
-  for (const candidate of candidates) {
-    if (!candidate) continue
-    try {
-      const parsed = JSON.parse(candidate)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
-    } catch { /* try next */ }
-  }
-  return null
-}
-
 function hasAnyField(draft: ParsedDraft): boolean {
   return [draft.name, draft.player, draft.appearance, draft.card, ...Object.values(draft.sheet)].some(v => v?.trim())
 }
@@ -207,12 +130,14 @@ async function draftViaDirectLLM(input: DraftInput, deps: DirectLLMDeps, profile
   // 请求体里直接带的 LLM 配置（TRPG 面板里临时填的）优先于 server 端 config.json，
   // 没有再回退到 profile 的默认模型 + 供应商凭证。都没有 → llm_not_configured。
   // 单测场景：注入的 `deps.loadConfig` 是唯一配置源，profile fallback 跳过。
-  const config = input.trpgLlmConfig
-    || (deps.loadConfig ? await deps.loadConfig() : null)
-    || await loadLLMConfig()
-    || (profile && !deps.loadConfig ? await resolveProfileLLMConfig(profile, input.model) : null)
+  const config = await resolveDirectLLMConfig(input, profile, deps)
   if (!config) throw new Error('llm_not_configured')
-  const content = input.image ? [{ type: 'text', text: input.text || '请依据图片提取角色资料。' }, { type: 'image_url', image_url: { url: input.image } }] : input.text
+  const content = input.image
+    ? [{ type: 'text', text: input.text || '请依据资料提取角色字段。' },
+      input.image.startsWith('data:application/pdf;')
+        ? { type: 'file', file: { filename: 'character.pdf', file_data: input.image } }
+        : { type: 'image_url', image_url: { url: input.image } }]
+    : input.text
   const res = await (deps.fetchImpl ?? fetch)(`${config.baseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST', signal: AbortSignal.timeout(60000), headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
     body: JSON.stringify({ model: input.model || config.model, temperature: 0.2, max_tokens: 5000, messages: [{ role: 'system', content: DRAFT_INSTRUCTIONS }, { role: 'user', content }] }),
@@ -231,7 +156,7 @@ async function draftViaDirectLLM(input: DraftInput, deps: DirectLLMDeps, profile
     throw new Error('generation_failed')
   }
   const data = await res.json() as any
-  const raw = String(data?.choices?.[0]?.message?.content || '')
+  const raw = responseText(data?.choices?.[0]?.message?.content)
   // 模型返回 200 但 content 里塞了错误文本（典型：MiniMax 把上游错误直接序列化进 content）。
   if (looksLikeImageFormatError(raw)) {
     const err: Error & { raw?: string } = new Error('image_format_unsupported')
@@ -354,10 +279,8 @@ async function runBridgeTurn(
         }
       }
       if (chunk.done) {
-        if (!finalText.trim()) {
-          const result = chunk.result as { final_response?: string } | undefined
-          finalText = result?.final_response || chunk.output || ''
-        }
+        const result = chunk.result as { final_response?: string } | undefined
+        finalText = result?.final_response || chunk.output || finalText
         break
       }
       if (chunk.status === 'error') {

@@ -636,7 +636,7 @@ export const useChatStore = defineStore('chat', () => {
     profile?: string
     model?: string
     provider?: string
-    source?: 'api_server' | 'cli' | 'coding_agent' | 'global_agent' | 'workflow' | 'group_chat'
+    source?: 'api_server' | 'cli' | 'coding_agent' | 'global_agent' | 'workflow' | 'group_chat' | 'trpg_recap'
     agent?: ChatAgentId
     codingAgentId?: ChatCodingAgentId
     codingAgentMode?: 'global' | 'scoped'
@@ -646,7 +646,7 @@ export const useChatStore = defineStore('chat', () => {
     apiKey?: string
     apiMode?: ProviderApiMode
   } = {}): Session {
-    const source = runtimeMode.value === 'global_agent' ? 'global_agent' : options.source || 'cli'
+    const source = options.source === 'trpg_recap' ? 'trpg_recap' : runtimeMode.value === 'global_agent' ? 'global_agent' : options.source || 'cli'
     const codingAgentId = options.codingAgentId || agentToCodingAgentId(options.agent)
     const codingAgentMode = codingAgentId ? (options.codingAgentMode || 'scoped') : undefined
     const session: Session = {
@@ -990,7 +990,7 @@ export const useChatStore = defineStore('chat', () => {
     profile?: string
     model?: string
     provider?: string
-    source?: 'api_server' | 'cli' | 'coding_agent' | 'global_agent' | 'workflow' | 'group_chat'
+    source?: 'api_server' | 'cli' | 'coding_agent' | 'global_agent' | 'workflow' | 'group_chat' | 'trpg_recap'
     agent?: ChatAgentId
     codingAgentId?: ChatCodingAgentId
     codingAgentMode?: 'global' | 'scoped'
@@ -1584,7 +1584,7 @@ if (codingAgentId === 'dsh') {
       const runModelGroups = profileModelGroups?.length ? profileModelGroups : appStore.modelGroups
       const providerGroup = runModelGroups.find(group => group.provider === sessionProvider)
       const storedSource = activeSession.value?.source
-      const sessionSource: StartRunRequest['source'] = storedSource === 'global_agent'
+      const sessionSource: StartRunRequest['source'] = storedSource === 'trpg_recap' ? 'trpg_recap' : storedSource === 'global_agent'
         ? 'global_agent'
         : storedSource === 'workflow'
           ? 'workflow'
@@ -1627,7 +1627,7 @@ if (codingAgentId === 'dsh') {
         workspace: activeSession.value?.workspace || undefined,
         category_id: activeSession.value?.categoryId ?? null,
         source: sessionSource,
-        ...(runtimeMode.value === 'global_agent' ? { session_source: 'global_agent' as const } : {}),
+        ...(runtimeMode.value === 'global_agent' && sessionSource !== 'trpg_recap' ? { session_source: 'global_agent' as const } : {}),
         ...(sessionSource === 'workflow' ? { session_source: 'workflow' as const } : {}),
         ...(isCodingAgentExecution
           ? {
@@ -3493,6 +3493,7 @@ if (codingAgentId === 'dsh') {
     },
 
     newChat,
+    createSession,
     newChatWithRemoteCreate,
     newCliSession,
     switchSession,

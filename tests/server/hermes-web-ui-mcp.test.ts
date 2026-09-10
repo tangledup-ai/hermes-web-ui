@@ -45,6 +45,45 @@ describe('hermes-web-ui MCP server', () => {
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
 
+  it('routes the meetings category to transcript snapshots and recap persistence', async () => {
+    const calls: any[] = []
+    const server = createServer((req, res) => {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        calls.push({ path: req.url, method: req.method, profile: req.headers['x-hermes-profile'], body: body ? JSON.parse(body) : null })
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ ok: true, sentences: [{ text: '银月举盾。' }], nextCursor: null }))
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as { port: number }
+    child = spawn(process.execPath, ['bin/hermes-studio-mcp.mjs', 'meetings'], {
+      cwd: process.cwd(), env: { ...process.env, HERMES_WEB_UI_URL: `http://127.0.0.1:${address.port}`, HERMES_WEB_UI_TOKEN: 'test-token', HERMES_WEB_UI_PROFILE: 'table' }, stdio: 'pipe',
+    })
+    const responses = new Map<number, any>()
+    let pending = ''
+    child.stdout.on('data', chunk => {
+      pending += chunk.toString()
+      let end: number
+      while ((end = pending.indexOf('\n')) >= 0) { const line = pending.slice(0, end); pending = pending.slice(end + 1); try { const message = JSON.parse(line); responses.set(message.id, message) } catch {} }
+    })
+    try {
+      writeRpc(child, 1, 'tools/list')
+      const result = await waitForRpc(responses, 1)
+      expect(result.result.tools.map((t: any) => t.name)).toEqual(['hermes_studio_meetings_toolset'])
+      expectProviderSafeToolNames('hermes-studio-meetings', result.result.tools)
+      writeRpc(child, 2, 'tools/call', { name: 'hermes_studio_meetings_toolset', arguments: { action: 'call', tool: 'hermes_studio_meetings_transcript_get', arguments: { meetingId: 'm1', requestId: 'snapshot', cursor: 9 } } })
+      expect((await waitForRpc(responses, 2)).result.isError).not.toBe(true)
+      writeRpc(child, 3, 'tools/call', { name: 'hermes_studio_meetings_toolset', arguments: { action: 'call', tool: 'hermes_studio_meetings_recap_save', arguments: { meetingId: 'm1', requestId: 'snapshot', title: '城门', chapters: [], timeline: [] } } })
+      expect((await waitForRpc(responses, 3)).result.isError).not.toBe(true)
+      expect(calls).toEqual([
+        { path: '/api/meeting-storage/m1/transcript?requestId=snapshot&cursor=9', method: 'GET', profile: 'table', body: null },
+        { path: '/api/meeting-storage/m1/recaps', method: 'PUT', profile: 'table', body: { requestId: 'snapshot', title: '城门', chapters: [], timeline: [] } },
+      ])
+    } finally { child.kill(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+  })
+
   it('exposes a public Web UI API requester tool', async () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-web-ui-mcp-'))
     homes.push(home)

@@ -1,62 +1,36 @@
-# 会议跑团插件（TRPG）
+# 会议跑团插件（TRPG 0.1.2）
 
-## 使用
+创建会议时选择跑团场景，右栏自动加载独立、懒加载的 TRPG 面板。
 
-1. 打开或创建会议，在「创建会议」场景选择里直接选「跑团模式」即可。已有跑团会议直接打开，右栏会自动加载角色卡面板。
-2. 添加角色，填写角色名称、玩家/发言人/别名、公开外观及角色卡正文。可附一张 PNG/JPEG/WebP 参考图（每角色最多 5 MB），点击「保存角色卡与设定」。最多 20 个角色，名称去除包裹符后必须唯一。
-3. AI 角色抄写员接收两类资料（均为可选，至少其一）：文本描述（最多 12000 字符）与图片 / PDF（PNG / JPEG / WebP / application/pdf，最大 5 MB）。PDF 直接以原始字节走多模态通道给 LLM，不在前端做转换；图片走 canvas 缩放 + JPEG 0.88。模型需要支持 image / PDF 多模态输入，否则会在生成草稿时返回 `draftFailed`。
-    - **解析路径优先级**：
-      1. **跑团面板 LLM 配置**（顶栏「「角色抄写员 LLM」折叠块，baseUrl / apiKey / model 三项；存在 localStorage `hermes.trpg.llmConfig`）→ 直调；最优先，本地最易用
-      2. **`meeting-asr/config.json` 的 `llm.api_key`** → 直调
-      3. **profile 默认模型 + 供应商凭证**（用户在 UI 里设默认模型但没填 `meeting-asr/config.json` 也能跑）：server 从 `~/.hermes/profiles/<name>/config.yaml` 读 `model.default + model.provider`，再从同 profile 的 `custom_providers` / `providers` 找 `base_url + api_key`（或 `key_env` 引用 `.env`）
-      4. **Hermes Agent bridge**（profile 有、上面都拿不到 → 走 agent 的模型 / 系统提示词 / 技能 / 记忆）
-      5. 都没有 → 503 `llm_not_configured`
-    - **手动 LLM 覆盖**：上面 1 和 2 任一即可。面板配置（路径 1）无需 server 配置，刷新后保留在该浏览器。
-    - **模型 PDF/image 拒绝 → bridge 自动回退**：直调 LLM 返回 `image_format_unsupported` 且输入是 PDF + 有 profile → server 自动改走 Hermes Agent bridge，把 PDF 解到 `${HERMES_WEB_UI_HOME}/trpg-uploads/<uuid>.pdf` 当临时文件传给 agent，agent 用 `read_file` / PDF 解析 skill 读取
-    - **agent 输出容错**：bridge 路径支持两次追问（同一 session）。如果第一轮 agent 输出的是「我先读 PDF / OCR 整理...」这种内心独白而非 JSON，server 会发一次「现在直接输出 JSON」追问，agent 用同一会话上下文继续（OCR 不用重做）。仍然失败 → `invalid_output` + 模型原始输出（前 800 字）方便排查
-    - **同义词吸收**：cleanSheet 自动把「六项属性 / 力量 / 敏捷 / DEX / AC / HP」等中文 / 缩写键名映射回 `strength / dexterity / armorClass / hpMax` 等结构化字段，避免「同一字段被填多次」的视觉重复
-4. 草稿审阅区每个 sheet 字段显示 diff：**(新) / (无变化) / (覆盖 · 原值：...)**，顶部 summary 显示「N 新增 · N 覆盖 · N 无变化」；方便多次生成时看清哪些字段会被改、哪些保持原样。点击「应用已审阅字段」会按 draft 里的非空字段合并到 card.sheet（不会清空已有字段）。
-5. 使用原会议录音/ASR；点击「生成图片 Prompt」读取点击时最新 60 句已确认转写（最多 12000 字符）。临时 ASR 片段不参与。
-6. 复制生成的提示词，并下载、另附角色参考图到目标 GPT Image 生图工具。这里生成的是文本提示词，不调用或硬编码任何图像模型 ID，包括用户所称的 GPT image2.5。
-7. 保留最近 30 条高光，包含生成时间、可编辑提示词和对应 ASR 原文依据。编辑后点击保存；可删除不需要的高光。
+## 角色卡与高光
 
-文本生成默认走 Hermes Agent bridge（无需任何密钥配置；profile 自带模型 / 系统提示词 / 记忆 / 技能）。若用户在 `config.json` 里手填 LLM，则自动切到直调。未配置、超时、bridge 不可用、输出校验失败分别提示；不把失败伪装为成功。参考图仅用于本地预览与下载，不发送给文本模型，不自动识别图片内容。
+- 角色卡按 D&D 5E 的身份、六项属性、战斗、技能、背景与法术分组，可折叠。玩家/发言者与角色名分开，输出名称统一为【角色名】。
+- AI 抄写员接收文字、图片或 PDF。图片以 image_url、PDF 以 file/file_data 发送；上游拒绝 PDF 时可回退到 Hermes Agent 临时文件读取。模型需要支持对应输入。
+- 草稿兼容 Markdown JSON、外围说明、嵌套 character/data/sheet、中文字段及属性缩写。Agent 最终答复优先于推理流。空结果仍明确报错，同一错误只显示一次。审阅后只应用非空字段。
+- 角色草稿配置顺序：请求显式配置 → 服务端会议 LLM → 当前 profile 模型凭证 → Hermes bridge。界面可选草稿模型。
+- 「生成图片 Prompt」直接调用会议分析 LLM：优先采用会议设置当前的 API Key/base URL/model，否则用服务端会议 LLM 配置。缺少配置明确提示，不悄悄切换 Agent。
+- 高光只取点击时最近 60 句确认转写（上限 12000 字符），保留动作证据；未确认的尝试不能写成战果，不确定的“我”不能猜角色。
+- 开启直接生图后，提示词和最多 4 张实际出场角色头像送到现有 profile 图像 API；返回图片在图库显示，点击放大后查看/编辑提示词。失败保留提示词可重试。provider/model 留空使用 profile 图像配置，不硬编码图像模型名称。
+- 角色、头像、高光与设置存在独立 IndexedDB，按服务器、用户、profile、会议隔离；最近保留 30 张高光。离开前保存。
+- 骰子区仅保留摄像头枚举、设备选择与禁用的检测按钮。没有启动摄像头、加载 ONNX 或连接 yolo 推理服务。
 
-调用过程可展开「调用过程」折叠块查看：status（PDF 临时文件 / 追问触发）/ tool_call（agent 用的工具及参数摘要）/ text（模型 delta 流）/ final（最后一次成功解析的 JSON 摘要）。raw 错误文本在 trace 与 error 状态行都各展示前 800 字。
+## 编年史
 
-## 跑团设计
+选小说化 / 记录体 / 日志体和语气（默认史诗），可指定 2–8 章；自动通常 3–6 章，短素材允许更少。
 
-- **角色与玩家分开**：稳定角色 ID 关联每次动作，最终名称由程序统一包装成 `【角色名】`。玩家、发言人、别名用于消歧；不确定的第一人称不能自动指派角色。
-- **事实与意图区分**：生成指令明确忽略场外闲聊、规则讨论与骰子指令；主持人确认及后续更正优先，不能将行动意图写成成功战果。
-- **单镜头高光**：最近叙事中的一个瞬间，加动作、姿态、外观、环境、构图和光线，不拼接整场冒险。
-- **公开信息边界**：角色卡作为身份背景资料，模型被要求不泄露未公开秘密；公开外观是独立字段。不要把仅供主持人保密的资料填入公开外观或场景。
-- **可核对**：服务端只接受已登记角色 ID 和转写原文中的逐字引句。该检查证明引用存在，不保证模型对原文的语义解读始终正确；生图前仍可编辑提示词。
-- **节奏**：手动按钮即时读取最新转写，不轮询 LLM、不自动消耗生成额度。后续若增加自动模式，应按新内容量触发、限频并允许主持人暂停。
+1. POST `/api/plugins/trpg/recap` 保存点击时完整转写快照和公开角色信息，不带头像、角色卡秘密。
+2. 创建服务端 Hermes 会话（source=trpg_recap），进入正常 ChatView 并发送 `trpg-recap` Skill 指令。
+3. Agent 使用新增的 meetings MCP 工具集逐页读取快照、切章、扩写、回写；不另造一套聊天执行器。
+4. 返回会议后加载服务端编年史列表，可展开章节、证据、时间线，也可刷新或删除。
 
-## 插件边界
+Skill：`packages/skills/trpg-recap/SKILL.md`，随现有 bundled skill 同步机制安装。MCP：`hermes_studio_meetings_toolset` 的 list/describe/call 暴露 meetings_list/get/transcript_get/recap_save。
 
-客户端业务位于 `packages/client/src/plugins/trpg/`，经已有 `HermesClientPlugin.install()` 注册：
+存储在 `getWebUiHome()/meetings/<meetingId>/recaps.json`，快照在同目录 `recap-requests/`。按 profile 过滤；原子写入、会议级串行队列；同一 requestId 的保存重试覆盖原结果。章节正文最多 1800 字符，引句和角色动作证据必须在快照中逐字出现。语义上的剧情一致性仍需读者审阅。
 
-- 核心新增通用 `PluginContext.addMeetingPanel()` 插槽；MeetingRightPanel 只负责选中插件和传入 `sessionId`、`sentences`。
-- 核心新增通用 `PluginContext.addSceneTemplate()` 插槽；SceneTemplatePicker 读取核心 6 个场景 + 插件贡献列表。TRPG 在 install 期间贡献一个 `id='trpg'` 的场景（D20 图标，`trpg.sceneLabel` / `trpg.sceneDesc` i18n 键），所以在「创建会议」picker 里也能直接选「跑团模式」建会。服务端对未知 sceneTemplate 走通用 prompt 回退（`getSceneTemplateOrDefault()`），无需在 server `scene-templates` 注册。
-- MeetingRightPanel 增加了 sceneTemplate → 插件面板的自动绑定：活跃会议 `sceneTemplate` 等于某个已注册插件 id 时，右栏直接渲染该插件面板（例如 `sceneTemplate='trpg'` + 插件启用 → 跑团面板直接显示，不走任何下拉框）。其他 scene 统一回退到 standard analysis / agent / realtime 分发。面板不提供手动切换入口；插件被运行时禁用时不入选 meetingPanels，自动回退到通用分发。
-- 面板通过 `defineAsyncComponent` 懒加载。主会议视图、会议 store、ASR 音频链路除 picker 多一项可选外不修改。
-- 插件管理中的 `trpg` 开关沿用现有机制，刷新后生效。
-- 服务端路由 `/api/plugins/trpg/highlight` 位于原鉴权边界内，controller 验证请求，独立 `services/trpg/highlight.ts` 负责生成及输出校验。
-- 编译期移除：移除客户端插件清单中的 import/registration，以及服务端路由清单中的 import/registration 后，可删除插件、控制器、路由与服务目录。
+相关 API：GET/PUT `/api/meeting-storage/:meetingId/recaps`、DELETE `.../recaps/:recapId`、GET `.../transcript?requestId=...&cursor=...`。
 
-角色卡、图片 Blob 与高光存在独立 IndexedDB `hermes-plugin-trpg`；按服务器地址、用户 ID、profile、会议 ID 隔离。不写入会议 localStorage，不增加服务器用户数据目录。图片以 Blob URL 展示并在卸载时释放。生成请求在面板卸载时取消，保存采用顺序队列，等待 IndexedDB transaction 完成后才显示成功。
+## 边界与验证
 
-当前版本资料仅在本浏览器，不跨设备同步；会议删除或插件禁用不自动删除 IndexedDB 资料。可在仍存在的会议中删除角色/高光后保存；彻底清理可删除浏览器的该 IndexedDB 数据库。离开面板前需点击保存。后续可在插件内扩展战役资料库、角色卡文件导入/导出、跨会议复用、场景切换与战役时间线；骰子判定和主持人裁决仍保持人工主导，避免将首版扩展成独立规则引擎。
+前端业务位于本目录；服务端位于 `services/trpg/`，控制器和路由保持薄层。共享字段定义不依赖 Vue/Koa。聊天核心仅增加 recap 来源与现有 Hermes 执行路径衔接。
 
-## 验证
-
-- `npm run test -- tests/server/trpg-highlight.test.ts tests/client/trpg-plugin.test.ts tests/client/plugins-registry.test.ts tests/client/meeting-right-panel.test.ts`
-- `npm run test:e2e -- tests/e2e/trpg.spec.ts`
-- `npm run harness:check`
-- `npm run build`
-- `node scripts/guard-no-inline-data-urls.mjs`
-
-仓库 map 引用的 `docs/harness/meeting-asr-safety-audit.md` 在本检出中不存在；本次不修改 ASR、CSP 或音频实现。
-
-本地验证结果：34 项针对性单元测试通过、跑团浏览器流程通过、完整构建与 harness/CSP guard 通过。浏览器测试使用本机 Chromium 和临时 HTTP Vite 配置，绕过本机证书自动开启 HTTPS 与默认 Playwright HTTP 地址不一致的问题；未修改生产配置。模型响应使用 mock，未调用真实付费模型。
+定向验证涵盖角色草稿解析、PDF 请求形状、会议 LLM 调用、编年史证据/并发/隔离、客户端会话跳转、MCP 协议、角色/图片浏览器流程及生产构建。模型/生图响应使用 mock，不消耗真实模型额度。服务重启后，新 Skill 与 MCP 配置由现有同步机制加载。

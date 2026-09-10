@@ -143,7 +143,7 @@ function denyProfile(ctx: any, profile: string | null | undefined): boolean {
 }
 
 function isVisibleWebUiSessionSource(source?: string | null): boolean {
-  return source === 'api_server' || source === 'cli' || source === 'coding_agent' || source === 'global_agent'
+  return source === 'trpg_recap' || source === 'api_server' || source === 'cli' || source === 'coding_agent' || source === 'global_agent'
 }
 
 function isRequestedSessionSource(source: string | undefined, sessionSource?: string | null): boolean {
@@ -157,7 +157,7 @@ function requestedSessionSources(source?: string): string[] {
   if (source === 'global_agent') return ['global_agent']
   if (source === 'workflow') return ['workflow']
   if (source === 'group_chat') return ['group_chat']
-  return ['api_server', 'cli', 'coding_agent', 'global_agent']
+  return ['api_server', 'cli', 'coding_agent', 'global_agent', 'trpg_recap']
 }
 
 function isHermesHistorySessionSource(source?: string | null): boolean {

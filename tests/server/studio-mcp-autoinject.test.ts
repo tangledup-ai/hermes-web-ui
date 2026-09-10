@@ -166,6 +166,7 @@ describe('studio MCP autoinject', () => {
       'hermes-studio-browser',
       'hermes-studio-devices',
       'hermes-studio-use',
+      'hermes-studio-meetings',
     ])
     expect(result.command).toBe(process.execPath)
   })
@@ -199,7 +200,7 @@ describe('studio MCP autoinject', () => {
     const resynced = await updater(configured)
 
     expect(resynced.result.status).toBe('updated')
-    expect(resynced.data.mcp_servers['hermes-studio-api'].env.HERMES_WEB_UI_URL).toBe('http://127.0.0.1:8648')
+    expect(resynced.data.mcp_servers['hermes-studio-api'].env.HERMES_WEB_UI_URL).toBe(`http://127.0.0.1:${configMock.port}`)
     expect(resynced.data.mcp_servers['hermes-studio-api'].timeout).toBe(42)
   })
 

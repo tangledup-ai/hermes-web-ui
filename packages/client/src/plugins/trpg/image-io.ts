@@ -15,7 +15,7 @@ export async function imageDataUri(blob: Blob): Promise<string> {
 /**
  * Encode any file (e.g. PDF character sheet) as a data URI without canvas conversion.
  * The downstream LLM is expected to consume the raw bytes for non-image MIME types
- * (vision-capable models read PDFs via the same `image_url` channel as images).
+ * (the server sends PDFs as file content blocks, images as image_url).
  */
 export async function fileDataUri(blob: Blob): Promise<string> {
   const buffer = await blob.arrayBuffer()

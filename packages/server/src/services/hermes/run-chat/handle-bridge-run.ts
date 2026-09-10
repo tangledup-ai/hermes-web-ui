@@ -50,9 +50,10 @@ const BRIDGE_TITLE_EVENT_POLL_INTERVAL_MS = 500
 const BRIDGE_TITLE_EVENT_POLL_TIMEOUT_MS = 45_000
 const BRIDGE_GOAL_EVALUATE_TIMEOUT_MS = 120_000
 
-type BridgeRunSource = Extract<ChatRunSource, 'cli' | 'global_agent' | 'workflow' | 'group_chat'>
+type BridgeRunSource = Extract<ChatRunSource, 'cli' | 'global_agent' | 'workflow' | 'group_chat' | 'trpg_recap'>
 
 function normalizeBridgeRunSource(source?: string | null, sessionSource?: string | null): BridgeRunSource {
+  if (source === 'trpg_recap') return 'trpg_recap'
   if (sessionSource === 'global_agent' || source === 'global_agent') return 'global_agent'
   if (sessionSource === 'group_chat' || source === 'group_chat') return 'group_chat'
   if (sessionSource === 'workflow' || source === 'workflow') return 'workflow'
@@ -135,7 +136,7 @@ function isReplaceableLocalTitle(sessionId: string): boolean {
 }
 
 function isBridgeSessionSource(source?: string | null): boolean {
-  return source === 'cli' || source === 'global_agent'
+  return source === 'trpg_recap' || source === 'cli' || source === 'global_agent'
 }
 
 function syncBridgeGeneratedTitle(sessionId: string, title: unknown, emit: (event: string, payload: any) => void): boolean {

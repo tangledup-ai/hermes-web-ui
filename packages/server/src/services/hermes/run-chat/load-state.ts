@@ -40,10 +40,10 @@ function restoreBackgroundDelegations(messages: any[]): SessionState['background
 }
 
 export function resolveRunSource(source?: string, sessionId?: string): ChatRunSource {
-  if (source === 'coding_agent' || source === 'global_agent' || source === 'workflow' || source === 'group_chat' || source === 'cli') return source
+  if (source === 'trpg_recap' || source === 'coding_agent' || source === 'global_agent' || source === 'workflow' || source === 'group_chat' || source === 'cli') return source
   if (sessionId) {
     const stored = getSession(sessionId)?.source
-    if (stored === 'coding_agent' || stored === 'global_agent' || stored === 'workflow' || stored === 'group_chat' || stored === 'cli') return stored
+    if (stored === 'trpg_recap' || stored === 'coding_agent' || stored === 'global_agent' || stored === 'workflow' || stored === 'group_chat' || stored === 'cli') return stored
   }
   return 'cli'
 }

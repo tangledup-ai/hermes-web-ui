@@ -398,6 +398,16 @@ describe('ChatRunSocket bridge readiness gating', () => {
     expect(socket.emit).not.toHaveBeenCalledWith('run.failed', expect.anything())
   })
 
+  it('routes recap sessions through Hermes while preserving their source', async () => {
+    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { handlers, io, socket } = makeServerHarness()
+    const server = new ChatRunSocket(io as any)
+    ;(server as any).onConnection(socket)
+    await handlers.get('run')?.({ input: 'recap', session_id: 'session-1', source: 'trpg_recap' })
+    expect(ensureReadyMock).toHaveBeenCalledTimes(1)
+    expect(handleBridgeRunMock.mock.calls[0][2]).toMatchObject({ source: 'trpg_recap' })
+  })
+
   it('routes global-agent Hermes runs through the bridge run path while preserving session source', async () => {
     const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
     const { handlers, io, socket } = makeServerHarness()

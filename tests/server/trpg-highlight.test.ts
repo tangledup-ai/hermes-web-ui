@@ -30,64 +30,15 @@ describe('TRPG highlight', () => {
     await expect(generateHighlight(parseInput(input), undefined, { loadConfig, fetchImpl: vi.fn(async () => new Response('secret', { status: 500 })) as unknown as typeof fetch })).rejects.toThrow('generation_failed')
   })
 
-  it('falls back to Hermes Agent bridge when loadLLMConfig is empty and profile is given', async () => {
-    const streamResults = [{
-      run_id: 'r1', session_id: 's1', status: 'complete',
-      delta: JSON.stringify(output), cursor: 0, output: '', done: true,
-      result: undefined, error: null, events: [], event_cursor: 0,
-    }]
-    async function* gen() { for (const c of streamResults) yield c }
-    const fakeBridge = {
-      chat: vi.fn().mockResolvedValue({ run_id: 'r1', session_id: 's1', status: 'accepted' }),
-      streamOutput: () => gen(),
-      destroy: vi.fn().mockResolvedValue(undefined),
-    }
-    const result = await generateHighlight(parseInput(input), 'default', {
-      loadConfig: async () => null,
-      createBridge: () => fakeBridge,
-    })
-    expect(result.prompt).toContain('【银月】：外观：银发。动作：举盾挡箭')
-    expect(fakeBridge.chat).toHaveBeenCalledTimes(1)
-    const [, message, , instructions, profile] = fakeBridge.chat.mock.calls[0]
-    expect(instructions).toContain('桌面角色扮演游戏')
-    expect(profile).toBe('default')
-    expect(typeof message).toBe('string')
-    expect((message as string).length).toBeGreaterThan(0)
-  })
-
-  it('maps bridge connect failures (ETIMEDOUT / ECONNREFUSED) to agent_unreachable', async () => {
-    const errs = [
-      Object.assign(new Error('Agent bridge connect timed out'), { code: 'ETIMEDOUT' }),
-      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
-    ]
-    for (const e of errs) {
-      const fakeBridge = {
-        chat: vi.fn().mockRejectedValue(e),
-        streamOutput: () => (async function* () { /* never */ })(),
-        destroy: vi.fn().mockResolvedValue(undefined),
-      }
-      await expect(generateHighlight(parseInput(input), 'default', {
-        loadConfig: async () => null,
-        createBridge: () => fakeBridge,
-      })).rejects.toMatchObject({ message: 'agent_unreachable' })
-    }
-  })
-
-  it('throws invalid_output when bridge returns non-JSON', async () => {
-    const streamResults = [{
-      run_id: 'r1', session_id: 's1', status: 'complete',
-      delta: 'thinking out loud without JSON', cursor: 0, output: '', done: true,
-      result: undefined, error: null, events: [], event_cursor: 0,
-    }]
-    async function* gen() { for (const c of streamResults) yield c }
-    const fakeBridge = {
-      chat: vi.fn().mockResolvedValue({ run_id: 'r1', session_id: 's1', status: 'accepted' }),
-      streamOutput: () => gen(),
-      destroy: vi.fn().mockResolvedValue(undefined),
-    }
-    await expect(generateHighlight(parseInput(input), 'default', {
-      loadConfig: async () => null,
-      createBridge: () => fakeBridge,
-    })).rejects.toThrow('invalid_output')
+  it('uses meeting config directly and never silently switches to an Agent', async () => {
+    await expect(generateHighlight(parseInput(input), 'default', { loadConfig: async () => null })).rejects.toThrow('llm_not_configured')
+    const d = deps(output)
+    const config = { apiKey: 'meeting-secret', baseUrl: 'https://meeting.invalid/v1', model: 'meeting-model' }
+    await generateHighlight(parseInput({ ...input, llmConfig: config }), 'default', d)
+    const [url, init] = (d.fetchImpl as any).mock.calls[0]
+    expect(url).toBe('https://meeting.invalid/v1/chat/completions')
+    const body = JSON.parse(init.body)
+    expect(body.model).toBe('meeting-model')
+    expect(JSON.stringify(body.messages)).not.toContain('meeting-secret')
   })
 })

@@ -24,3 +24,8 @@ meetingStorageRoutes.get('/api/meeting-storage/:meetingId/json', ctrl.downloadJs
 // HTML report
 meetingStorageRoutes.put('/api/meeting-storage/:meetingId/html', ctrl.saveHtmlReport)
 meetingStorageRoutes.get('/api/meeting-storage/:meetingId/html', ctrl.downloadHtmlReport)
+
+import * as recap from '../../controllers/trpg-recap'
+meetingStorageRoutes.get('/api/meeting-storage/:meetingId/recaps', recap.list)
+meetingStorageRoutes.put('/api/meeting-storage/:meetingId/recaps', recap.save)
+meetingStorageRoutes.delete('/api/meeting-storage/:meetingId/recaps/:recapId', recap.remove)

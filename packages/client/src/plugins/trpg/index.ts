@@ -11,7 +11,7 @@ const TRPG_SCENE_ICON_SVG = `
   <line x1="18.5" y1="20" x2="12" y2="13"/>`
 
 const plugin: HermesClientPlugin = {
-  id: 'trpg', name: 'TRPG / 跑团模式', version: '0.1.1',
+  id: 'trpg', name: 'TRPG / 跑团模式', version: '0.1.2',
   description: 'Meeting character cards and ASR highlight image prompts.',
   install(ctx) {
     for (const [locale, text] of Object.entries(messages)) ctx.addI18nMessages(locale as SupportedLocale, { trpg: text })

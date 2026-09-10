@@ -251,13 +251,13 @@ describe('TRPG character draft input', () => {
 })
 
 describe('TRPG character draft generation', () => {
-  it('passes PDF data URI through to the model as image_url', async () => {
+  it('passes PDF as a file content block, never an image URL', async () => {
     const d = deps({ name: '银月', player: '小林', appearance: '银发', card: '', sheet: {} })
     await draftCharacter(parseDraftInput({ text: '', image: validPdf }), undefined, d)
     const body = JSON.parse((d.fetchImpl.mock.calls[0] as any)[1].body)
     const userMsg = body.messages[1]
     expect(Array.isArray(userMsg.content)).toBe(true)
-    expect(userMsg.content[1].image_url.url).toBe(validPdf)
+    expect(userMsg.content[1]).toEqual({ type: 'file', file: { filename: 'character.pdf', file_data: validPdf } })
   })
 
   it('reports llm_not_configured when no LLM config and no profile are provided', async () => {

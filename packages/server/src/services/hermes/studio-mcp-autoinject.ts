@@ -13,6 +13,7 @@ const MANAGED_SERVERS: ReadonlyArray<{ name: string; toolset: string }> = [
   { name: 'hermes-studio-browser', toolset: 'browser' },
   { name: 'hermes-studio-devices', toolset: 'devices' },
   { name: 'hermes-studio-use', toolset: 'use' },
+  { name: 'hermes-studio-meetings', toolset: 'meetings' },
 ]
 const MANAGED_SERVER_NAMES: Set<string> = new Set(MANAGED_SERVERS.map(server => server.name))
 // Hermes Agent applies this per managed MCP server. Keep the long-running

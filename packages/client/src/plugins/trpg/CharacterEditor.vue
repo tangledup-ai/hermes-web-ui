@@ -106,14 +106,7 @@ async function fill() {
     else if (code === 'image_format_unsupported') key = 'image_format_unsupported'
     else if (code === 'invalid_output') key = 'invalid_output'
     else key = 'draftFailed'
-    const base = t(`trpg.${key}`)
-    const raw = err.message || ''
-    const detail = raw.replace(/^API Error \d+:\s*/, '').trim()
-    let text = detail && detail !== base ? `${base} · ${detail}` : base
-    if ((code === 'invalid_output' || code === 'image_format_unsupported') && err.raw) {
-      text = `${text}\n\n${t('trpg.invalidOutputRaw')}\n${err.raw}`
-    }
-    error.value = text
+    error.value = t(`trpg.${key}`)
   }
   finally { filling.value = false }
 }
@@ -143,7 +136,6 @@ onBeforeUnmount(() => { disposed = true; abort.abort(); clearSource() })
       <span class="fold-mark" aria-hidden="true">⌄</span>
     </summary>
     <div v-if="expanded" class="character-body">
-      <p v-if="error" role="alert">{{ error }}</p>
       <details v-if="trace.length" class="trace-panel">
         <summary>{{ t('trpg.traceTitle') }} <small>{{ trace.length }}</small></summary>
         <ol class="trace-list">
@@ -163,7 +155,7 @@ onBeforeUnmount(() => { disposed = true; abort.abort(); clearSource() })
           <label class="upload-label">{{ t('trpg.image') }}<input type="file" accept="image/png,image/jpeg,image/webp" :aria-label="t('trpg.image')" @change="choose($event, true)" /></label>
           <button v-if="portrait" class="quiet" type="button" @click="emit('clearPortrait')">{{ t('trpg.clearImage') }}</button>
         </div>
-        <details class="ai-workshop">
+        <details class="ai-workshop" :open="!!error || undefined">
           <summary>✧ {{ t('trpg.aiFill') }}</summary>
           <p class="muted">{{ t('trpg.aiHint') }}</p>
           <label>{{ t('trpg.sourceText') }}<textarea v-model="source" :aria-label="t('trpg.sourceText')" rows="3" maxlength="12000" /></label>

@@ -107,6 +107,7 @@ export async function saveTranscript(ctx: Context): Promise<void> {
 }
 
 export async function getTranscript(ctx: Context): Promise<void> {
+  if (ctx.query.requestId) { const { transcript } = await import('../trpg-recap'); await transcript(ctx); return }
   const { meetingId } = ctx.params
   const sentences = await meetingStorageService.getTranscript(meetingId)
   ctx.body = { sentences }

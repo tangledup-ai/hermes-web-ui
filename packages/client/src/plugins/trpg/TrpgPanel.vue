@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useMeetingStore } from '@/stores/hermes/meeting'
 import { request, getBaseUrlValue, getStoredUserId, getActiveProfileName } from '@/api/client'
 import { useModelsStore } from '@/stores/hermes/models'
 import { campaignStorage, snapshotCampaign, emptyCampaign, recentTranscript, defaultImageSettings, type CharacterCard, type Highlight } from './storage'
 import { imageDataUri, generatedImageBlob } from './image-io'
 import { cleanSheet } from '../../../../shared/trpg'
+import RecapSection from './RecapSection.vue'
 import CharacterEditor from './CharacterEditor.vue'
 import DiceControls from './DiceControls.vue'
 import HighlightGallery from './HighlightGallery.vue'
 import './trpg.css'
 const props = defineProps<{ sessionId: string; sentences: { text: string; speaker?: string }[] }>()
 const { t } = useI18n()
+const meetingStore = useMeetingStore()
 const campaign = ref(emptyCampaign())
 const loading = ref(true), busy = ref(false), error = ref(''), notice = ref(''), stage = ref('')
 const previews = ref<Record<string, string>>({}), sceneImages = ref<Record<string, string>>({})
@@ -84,7 +87,9 @@ async function generate() {
     if (!await save() || disposed) return
     const result = await request<{ prompt: string; actions: Highlight['actions'] }>('/api/plugins/trpg/highlight', {
       method: 'POST', signal: abort.signal,
-      body: JSON.stringify({ transcript: source, setting: campaign.value.setting, style: campaign.value.style,
+      body: JSON.stringify({ transcript: source, llmConfig: meetingStore.asrConfig.llmApiKey.trim() ? {
+        apiKey: meetingStore.asrConfig.llmApiKey, baseUrl: meetingStore.asrConfig.llmBaseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: meetingStore.asrConfig.llmModel || 'qwen-plus',
+      } : undefined, setting: campaign.value.setting, style: campaign.value.style,
         characters: campaign.value.characters.map(({ id, name, player, appearance, card }) => ({ id, name, player, appearance, card })) }),
     })
     if (disposed) return
@@ -100,7 +105,7 @@ async function generate() {
   } catch (e) {
     if (!disposed) {
       const code = (e as { code?: string }).code ?? ''
-      error.value = t(`trpg.${['llm_not_configured', 'agent_unreachable', 'no_highlight', 'invalid_output'].includes(code) ? code : 'generation_failed'}`)
+      error.value = t(`trpg.${code === 'llm_not_configured' ? 'meetingLlmMissing' : code === 'invalid_output' ? 'highlightInvalid' : code === 'no_highlight' ? code : 'generation_failed'}`)
     }
   } finally { busy.value = false; stage.value = '' }
 }
@@ -129,6 +134,7 @@ onBeforeUnmount(() => { disposed = true; abort.abort(); Object.keys(previews.val
       <div class="scene-command"><div><span class="live-dot" />{{ t('trpg.asrContext') }} <b>{{ Math.min(sentences.length, 60) }}</b></div><button class="primary" type="button" :disabled="busy || !transcript.trim() || !campaign.characters.length" @click="generate">✧ {{ busy ? stage : t(settings.enabled ? 'trpg.generateImage' : 'trpg.generate') }}</button></div>
       <p v-if="!transcript.trim() || !campaign.characters.length" class="muted">{{ t('trpg.empty') }}</p>
       <HighlightGallery :highlights="campaign.highlights" :images="sceneImages" :busy="busy" :direct="settings.enabled" @remove="removeHighlight" @save="save" @render="renderExisting" />
+      <RecapSection :meeting-id="sessionId" :sentences="sentences" :characters="campaign.characters" :setting="campaign.setting" :style="campaign.style" />
       <details class="utility-section"><summary>{{ t('trpg.sceneSettings') }}</summary><fieldset :disabled="busy"><label>{{ t('trpg.setting') }}<textarea v-model="campaign.setting" :aria-label="t('trpg.setting')" maxlength="3000" rows="3" /></label><label>{{ t('trpg.style') }}<input v-model="campaign.style" :aria-label="t('trpg.style')" maxlength="500" :placeholder="t('trpg.styleHint')" /></label></fieldset></details>
       <details class="utility-section"><summary>{{ t('trpg.imageSettings') }}<small>{{ t(settings.enabled ? 'trpg.on' : 'trpg.off') }}</small></summary>
         <fieldset :disabled="busy"><label class="check"><input v-model="settings.enabled" type="checkbox" />{{ t('trpg.directGeneration') }}</label><p class="muted">{{ t('trpg.imageSettingsHint') }}</p>
