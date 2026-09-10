@@ -989,7 +989,7 @@ const realtimeSubModeOptions: Array<{ value: NewChatRealtimeSubMode; labelKey: s
 ];
 
 // 口语对练模式的配置：练习语言 / 练习方向（手动输入）/ 难度 / 时长。
-const newChatPracticeLanguage = ref<PracticeLanguage>("en");
+const newChatPracticeLanguage = ref<PracticeLanguage>("zh");
 const newChatPracticeDirection = ref("");
 const newChatPracticeDifficulty = ref<PracticeDifficulty>("intermediate");
 /** 练习时长（分钟）；0 = 不限时，倒计时到点自动结束并生成报告。 */
@@ -1470,7 +1470,7 @@ async function openNewChatModal() {
   newChatRealtimeModel.value = "qwen3.5-omni-flash-realtime";
   // Realtime 子模式默认回到 Agent 模式；对练配置（语言/方向/难度/时长）复位。
   newChatRealtimeSubMode.value = "agent";
-  newChatPracticeLanguage.value = "en";
+  newChatPracticeLanguage.value = "zh";
   newChatPracticeDirection.value = "";
   newChatPracticeDifficulty.value = "intermediate";
   newChatPracticeMinutes.value = 0;
