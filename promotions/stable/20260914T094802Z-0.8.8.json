@@ -1,0 +1,8 @@
+{
+  "promotedAt": "2026-09-14T09:48:02Z",
+  "tag": "v0.8.8",
+  "version": "0.8.8",
+  "channel": "stable",
+  "candidatePath": "candidates/stable/0.8.8.json",
+  "promotedBy": "github-actions[bot] via workflow_dispatch"
+}
