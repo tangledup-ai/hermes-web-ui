@@ -20,6 +20,46 @@ import path from 'path'
  * (config.env) — which is the common case after the user saves ASR config
  * from the UI.
  */
+/** 读「设置 → 模型 → Realtime 模型」里保存的 Qwen key（DB 未就绪时返回 null）。 */
+export async function readRealtimePanelApiKey(profile = 'default'): Promise<string | null> {
+  try {
+    // 动态 import: 保持本模块在纯文件系统场景（单测 / 无 DB 的启动早期）
+    // 不依赖 db/index 的加载顺序。
+    const { getRealtimeModelSetting } = await import('../../db/hermes/realtime-settings-store')
+    const key = getRealtimeModelSetting(profile || 'default', { includeSecrets: true })?.secrets?.apiKey?.trim()
+    return key || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 统一解析 DashScope key（会议 ASR / Realtime 的单一入口）。
+ *
+ * 顺序：
+ *   1. `dataDir/config.json` + `config.env` —— 会议 ASR 向导显式保存的 key（设备上的专用覆盖）
+ *   2. 「设置 → 模型 → Realtime 模型」(SQLite `realtime_profile_settings.secrets.apiKey`)
+ *      —— 界面承诺的「共用默认值」
+ *   3. 进程环境变量 `DASHSCOPE_API_KEY`
+ *
+ * 为什么要接第 2 处（2026-10-11, 设备 192.168.1.54 事故）：浏览器侧在 start 时会把
+ * Realtime 面板的 key 显式下发给后端，所以一直正常；而**设备端 Qt 客户端只会开
+ * `/ws/omni-realtime`**，服务端只能用持久化回落。旧实现只看 config.json / config.env，
+ * 用户只在 Realtime 面板填过 key（产品推荐的单点入口）时两者都不存在 →
+ * 后端拿到空 key → 实时对话报 "DASHSCOPE_API_KEY is not configured"。
+ *
+ * 文件优先是刻意保留旧行为：会议 ASR 向导里填的 key 属于对该设备的专用覆盖，
+ * Realtime 面板只是回落默认值（与 i18n 文案「未单独填写时回落使用」一致）。
+ */
+export async function resolveDashScopeKey(dataDir: string, profile = 'default'): Promise<string | null> {
+  const fromFiles = await readStoredDashScopeKey(dataDir).catch(() => null)
+  if (fromFiles) return fromFiles
+  const fromPanel = await readRealtimePanelApiKey(profile)
+  if (fromPanel) return fromPanel
+  const env = process.env.DASHSCOPE_API_KEY
+  return env && env.trim() ? env.trim() : null
+}
+
 export async function readStoredDashScopeKey(dataDir: string): Promise<string | null> {
   // 1. config.json (JSON)
   try {

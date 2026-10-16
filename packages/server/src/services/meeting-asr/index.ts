@@ -301,6 +301,65 @@ export class MeetingASRService extends EventEmitter {
     return dashscopeKeyStore.readStoredDashScopeKey(dataDir)
   }
 
+  /**
+   * 把持久化里解析到的 DashScope key 热推给「已在运行但没拿到 key」的后端进程。
+   *
+   * 场景（2026-10-11 设备 192.168.1.54）：用户先打开录音/会议页 → 后端以空 key 启动
+   * → 之后才在「设置 → 模型 → Realtime 模型」填 key。浏览器随后会把 key 显式下发，
+   * 但设备端 Qt 客户端只开 `/ws/omni-realtime`、不会下发，于是实时对话持续报
+   * "DASHSCOPE_API_KEY is not configured"。这里在实时 WS 接入前补推一次，
+   * 用户无需重启服务/应用。
+   *
+   * 只在后端当前 key 为空时推送 —— 已有 key（会议向导或浏览器下发的）不动。
+   * 返回 true 表示确实推送了一次。
+   */
+  async ensureDashScopeKeyPushed(profile = 'default'): Promise<boolean> {
+    if (!this._isRunning || !this._asrPort) return false
+
+    let stored: string | null = null
+    try {
+      stored = await dashscopeKeyStore.resolveDashScopeKey(this.getDataDir(), profile)
+    } catch {
+      return false
+    }
+    if (!stored) return false
+
+    let asr: Record<string, unknown> | null = null
+    try {
+      const res = await this.backendRequest(this._asrPort, '/api/config', 'GET', undefined, 5000)
+      const parsed = JSON.parse(res.body)
+      asr = (parsed && typeof parsed.asr === 'object' && parsed.asr) || null
+    } catch (err) {
+      logger.warn(
+        '[meeting-asr] could not read backend config before key push: %s',
+        err instanceof Error ? err.message : err,
+      )
+      return false
+    }
+    if (String(asr?.dashscope_api_key || '').trim()) return false
+
+    const payload: Record<string, unknown> = { ...(asr || {}) }
+    // get_config_safe() 会额外附带 *_masked 展示字段，不属于 ASRConfig。
+    for (const key of Object.keys(payload)) {
+      if (key.endsWith('_masked')) delete payload[key]
+    }
+    payload.dashscope_api_key = stored
+
+    try {
+      const res = await this.backendRequest(
+        this._asrPort, '/api/config/asr', 'POST', JSON.stringify(payload), 8000,
+      )
+      if (res.status >= 200 && res.status < 300) {
+        logger.info('[meeting-asr] pushed stored DashScope key (%d chars) to running backend', stored.length)
+        return true
+      }
+      logger.warn('[meeting-asr] DashScope key push rejected: %d %s', res.status, res.body.slice(0, 200))
+    } catch (err) {
+      logger.warn('[meeting-asr] DashScope key push failed: %s', err instanceof Error ? err.message : err)
+    }
+    return false
+  }
+
   private async ensureVirtualEnv(): Promise<string> {
     const backendPath = this.getPythonBackendPath()
     const dataDir = this.getDataDir()
@@ -430,18 +489,18 @@ export class MeetingASRService extends EventEmitter {
         env.DASHSCOPE_API_KEY = config.dashscopeApiKey
       } else {
         // Auto-restart fallback: the caller (UI or auto-restart) didn't
-        // provide a key inline, so recover it from persistent storage.
-        // The Python backend stores secrets in TWO files under dataDir:
-        //   - config.json  (LLM section: llm.api_key)
-        //   - config.env    (shell-style: DASHSCOPE_API_KEY=...)
-        // We check both because the Python `storage.update_config` writes
-        // config.env for env-based consumption (used by config.py at import
-        // time) while the Node controller's updateASRConfig pushes via
-        // /api/config which only touches config.json. Missing either source
-        // meant "DASHSCOPE_API_KEY is not configured" on auto-restart or
-        // first UI start after a deploy.
+        // provide a key inline, so recover it from persistent storage:
+        //   - config.json / config.env  (meeting ASR wizard writes these)
+        //   - 「设置 → 模型 → Realtime 模型」的 key (SQLite realtime_profile_settings)
+        //   - process env DASHSCOPE_API_KEY
+        // The third source was added after the 2026-10-11 device incident: the
+        // Qt client only opens /ws/omni-realtime (unlike the browser, which
+        // pushes the key inline), so a device whose user had only filled the
+        // Realtime panel started the backend with an empty key and realtime
+        // failed with "DASHSCOPE_API_KEY is not configured".
+        // See dashscope-key-store.resolveDashScopeKey() for the ordering rationale.
         try {
-          const key = await this.readStoredDashScopeKey(dataDir)
+          const key = await dashscopeKeyStore.resolveDashScopeKey(dataDir)
           if (key) env.DASHSCOPE_API_KEY = key
         } catch { /* best effort */ }
       }

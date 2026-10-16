@@ -598,7 +598,12 @@ export async function bootstrap() {
       socket.pause()
       // Realtime uses the managed ASR child. Node reloads stop that child;
       // lazily restore it instead of forwarding into a closed port forever.
-      void (req.url === '/ws/omni-realtime' ? ensureRealtimeBackendReady() : Promise.resolve())
+      void (req.url === '/ws/omni-realtime'
+        // Realtime 接入前补推一次持久化的 DashScope key：设备端 Qt 客户端只开 WS、
+        // 不像浏览器那样把 key 显式下发，若后端先以空 key 启动（用户后来才在
+        // 「设置 → 模型 → Realtime 模型」里填 key），这里让它无需重启即可生效。
+        ? ensureRealtimeBackendReady().then(() => meetingASRService.ensureDashScopeKeyPushed())
+        : Promise.resolve())
         .then(() => {
           if (socket.destroyed) return
           if (req.url === '/ws/omni-realtime') targetPort = meetingASRService.getASRPort() || 8000
