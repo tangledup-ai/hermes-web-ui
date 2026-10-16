@@ -6,10 +6,19 @@
 <code>webContents.debugger</code>，不通过 <code>agent-browser</code>，也不开放
 远程调试端口。
 
+## 修订记录
+
+| 日期 | 决策 | 影响 |
+|---|---|---|
+| 2026-10-16 | **Web / 设备部署允许一个服务端托管的浏览器面板**，由 `HERMES_BROWSER_SURFACE`（`off` \| `local`）控制；目标设备形态默认 `local`，但必须先通过内存 / 可用磁盘 / 浏览器可执行文件的硬门槛；`HERMES_DESKTOP=true` 时强制 `off`。桌面端仍然是唯一提供**原生内置**浏览器的形态（Electron `WebContentsView`）。 | 本文档原「永久不提供」「都不提供」这类绝对表述作废（见 §三、§五）。Web 版设计来源迁到 [`docs/web-agent-browser/README.md`](../web-agent-browser/README.md)，实现规格见同目录 `spec-01`…`spec-10`。桌面端专属约束（CDP 不暴露给 Agent、不开放远程调试端口、Broker Token 不进模型上下文）继续有效。 |
+
 ## 一、结论
 
 Hermes Studio 桌面端新增一个基于 Electron <code>WebContentsView</code> 的内置浏览器。
-普通浏览器打开的 Web UI、VPS 部署的 Web UI 都不提供浏览器功能。
+桌面端是唯一提供**原生内置**浏览器的形态；普通浏览器打开的 Web UI、VPS 部署的
+Web UI 不提供原生内置浏览器，改为提供一个**服务端托管、契约与桌面端一致**的浏览器
+面板（由 `HERMES_BROWSER_SURFACE` 控制，目标设备形态默认开启并受硬门槛约束，
+详见 §五与 [`docs/web-agent-browser/README.md`](../web-agent-browser/README.md)）。
 
 浏览器有两条控制链路，最终都汇入 Electron 主进程中的
 <code>BrowserManager</code>：
@@ -62,7 +71,9 @@ Electron API 和 CDP：
 - 不做完整 Chrome 替代品。
 - 不直接复用用户本机 Chrome 的 Profile 目录。
 - 第一版不支持 Chrome 扩展、密码导入、书签同步和浏览历史同步。
-- 普通 Web UI 和 VPS Web UI 永久不提供内置浏览器功能。
+- 普通 Web UI 和 VPS Web UI 不提供 Electron 形态的原生内置浏览器；它们只提供
+  §五 描述的**服务端托管**浏览器面板，由 `HERMES_BROWSER_SURFACE` 控制，
+  设计来源见 [`docs/web-agent-browser/README.md`](../web-agent-browser/README.md)。
 - 不把 CDP 地址、Electron 对象或原始 IPC 暴露给 Agent。
 - 不允许 Agent 在没有确认机制的情况下执行购买、发布、删除数据、
   上传文件、输入敏感凭据等高风险操作。
@@ -116,21 +127,39 @@ browser
 
 ## 五、平台边界
 
-内置浏览器只存在于可信 Electron 环境：
+**原生内置浏览器**只存在于可信 Electron 环境：
 
 - Electron 主进程拥有标签页、<code>WebContentsView</code>、Profile、权限、
   截图、DOM 注入、CDP 和生命周期。
 - <code>packages/client</code> 可以放浏览器界面，因为桌面端复用同一个 Vue
   客户端。
-- 浏览器界面必须检测完整且可信的 Desktop Browser Bridge，并采用懒加载。
-- 普通 Web UI 不显示入口，不允许访问路由，也不初始化相关 Store。
-- 普通 Web UI Server 不注册浏览器 Koa 路由、OpenAPI、Socket.IO namespace、
-  CDP Relay 或截图流。
-- 环境变量、URL 参数、Local Storage 和 User-Agent 都不能开启该功能。
+- 桌面浏览器界面必须检测完整且可信的 Desktop Browser Bridge，并采用懒加载。
 - 没有可信 Preload Bridge 时，直接访问桌面浏览器路由必须跳回安全页面。
+- 桌面端继续：不把 CDP 地址 / Electron 对象 / 原始 IPC 暴露给 Agent、不开放
+  远程调试端口、不把 Broker Token 放进模型上下文。
 
-浏览器界面代码可以存在于共享 Client 包中，但浏览器能力本身不存在于普通 Web
-环境。
+**Web / 设备部署**提供的是一个**服务端托管**的浏览器面板，不是 Electron 原生
+面板：
+
+- 由 `HERMES_BROWSER_SURFACE` 控制，取值 `off` | `local`，默认 `local`；启动时
+  一次性判定并**冻结**，非法取值一律按 `off` 处理并输出告警（不静默降级）。
+- 默认 `local` 必须配套**硬门槛**（MemTotal ≥ 3 GiB、MemAvailable ≥ 1.2 GiB、
+  浏览器可执行文件可解析、Web UI home 所在卷可用磁盘 ≥ 1 GiB），任一项不满足即
+  **不启用**，缺失项按"不启用"处理，不得半开。
+- `off`（含硬门槛不满足）时**完全不注册**浏览器 Koa 路由、OpenAPI、
+  Socket.IO namespace、CDP Relay、截图流与 broker descriptor；不是"注册后返回
+  403"。
+- `HERMES_DESKTOP=true` 时强制 `off`：桌面端已有原生面板，两套共存会争抢同一个
+  broker descriptor 路径。
+- 画面由共享 Client 包里的自绘 canvas 承载，不引入 iframe，因此 CSP 不需要任何
+  例外。
+- 环境变量、URL 参数、Local Storage 和 User-Agent 都不能开启**桌面端原生**
+  浏览器；`HERMES_BROWSER_SURFACE` 是服务端托管面板的唯一开关，且只在启动时生效
+  一次。
+
+浏览器界面代码可以存在于共享 Client 包中，桌面端与 Web 端共用同一套 UI 组件，
+但两者的**能力宿主**不同：桌面端由 Electron 主进程持有，Web 端由服务端自持的
+CDP 连接持有。
 
 ## 六、MCP 工具设计
 

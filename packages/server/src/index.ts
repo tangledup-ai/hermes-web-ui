@@ -11,6 +11,9 @@ import { join, relative, resolve } from 'path'
 import { mkdir } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { config, getLoopbackBaseUrl, getLoopbackPort, shouldCreateWebUiDataDir } from './config'
+import { initializeBrowserSurfaceGate } from './config/browser-surface'
+import { createBrowserSurfaceProbe } from './services/browser/surface-probe'
+import { startWebBrowserBroker } from './services/browser/broker-instance'
 import { initLoginLimiter } from './services/login-limiter'
 import { bindShutdown } from './services/shutdown'
 import { setupTerminalWebSocket } from './routes/hermes/terminal'
@@ -345,6 +348,19 @@ export async function bootstrap() {
   if (shouldCreateWebUiDataDir()) {
     await mkdir(config.dataDir, { recursive: true })
   }
+
+  // Web Agent browser surface (spec-01): evaluate the off|local gate once and
+  // freeze it. Later init steps read the frozen decision through
+  // isBrowserSurfaceEnabled() instead of re-reading the environment. The probe
+  // below plugs in the spec-02 executable resolver (system chromium first) and
+  // records the version it resolved.
+  initializeBrowserSurfaceGate({ probe: createBrowserSurfaceProbe() })
+
+  // Web Browser Broker (spec-05): a loopback RPC endpoint the MCP layer finds
+  // through the shared descriptor file. It costs one listening socket — no
+  // browser process starts until a tab is created — and nothing at all starts
+  // when the gate is off (desktop mode keeps Electron as the only broker).
+  await startWebBrowserBroker()
 
   await initLoginLimiter()
   if (skillInjectionDisabled()) {

@@ -502,6 +502,68 @@ if (desktopWebuiServer.includes('bundledBrowserExecutable()')) {
   fail('desktop webui server must let agent-browser resolve the bundled browser from AGENT_BROWSER_HOME')
 }
 
+// --- Web agent browser surface (docs/web-agent-browser/spec-01) -------------
+// Assertion D: the desktop webui-server must never become the browser runtime
+// host. The Electron main process owns the native panel; the server-side
+// surface (spec-02..08) lives in packages/server.
+for (const phrase of [
+  '--remote-debugging-pipe',
+  '--remote-debugging-port',
+  'Page.startScreencast',
+  'desktop-browser',
+]) {
+  if (desktopWebuiServer.includes(phrase)) {
+    fail(`desktop webui server must not host the browser runtime (spec-01 assertion D): ${phrase}`)
+  }
+}
+
+const browserSurfaceSource = await readText('packages/server/src/config/browser-surface.ts')
+const browserSurfaceTest = await readText('tests/server/browser-surface.test.ts')
+const serverIndexSource = await readText('packages/server/src/index.ts')
+const deploySourceArmbianScript = await readText('scripts/deploy-source-armbian.sh')
+const devicePackageBuilder = await readText('scripts/build-device-package.mjs')
+
+// Assertion E': the surface must be off under HERMES_DESKTOP, and that
+// behaviour must be covered by a test.
+if (!browserSurfaceSource.includes('HERMES_DESKTOP')) {
+  fail("browser-surface.ts must force the surface off when HERMES_DESKTOP=true (spec-01 assertion E')")
+}
+if (!browserSurfaceTest.includes('HERMES_DESKTOP')) {
+  fail("browser-surface.test.ts must cover the HERMES_DESKTOP=off behaviour (spec-01 assertion E')")
+}
+
+// Assertion F: the hard gate cannot be bypassed or skipped at startup.
+for (const phrase of [
+  '/proc/meminfo',
+  'mem_total',
+  'mem_available',
+  'free_disk',
+  'browser_executable',
+  'BROWSER_SURFACE_THRESHOLDS',
+]) {
+  if (!browserSurfaceSource.includes(phrase)) {
+    fail(`browser-surface.ts must implement the hard gate check: ${phrase}`)
+  }
+}
+if (!serverIndexSource.includes('initializeBrowserSurfaceGate(')) {
+  fail('server startup must evaluate and freeze the browser surface gate (spec-01 assertion F)')
+}
+if (serverIndexSource.includes('HERMES_BROWSER_SURFACE')) {
+  fail('server startup must not read HERMES_BROWSER_SURFACE directly; use the frozen gate accessors')
+}
+
+// Acceptance 4: the gate has exactly one source of truth (default value plus
+// hard gate). Device provisioning must never write an explicit enable, so a
+// second effective switch can never appear on a device.
+for (const [file, source] of [
+  ['scripts/deploy-source-armbian.sh', deploySourceArmbianScript],
+  ['scripts/build-device-package.mjs', devicePackageBuilder],
+]) {
+  if (/HERMES_BROWSER_SURFACE\s*[=:]\s*["']?local/i.test(source)) {
+    fail(`${file} must not enable the browser surface; the default value plus hard gate is the only source`)
+  }
+}
+
 for (const phrase of [
   'requestSingleInstanceLock(QUIT_EXISTING ? { quit: true } : undefined)',
   'hasQuitRequest(additionalData)',

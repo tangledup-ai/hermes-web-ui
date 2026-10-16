@@ -1813,6 +1813,25 @@ WEBUI_UPDATE_MANIFEST_BASE_URL="${WEBUI_UPDATE_MANIFEST_BASE_URL:-${OSS_PUBLIC_B
 WEBUI_UPDATE_MANIFEST_URLS="${WEBUI_UPDATE_MANIFEST_URLS:-${OSS_PUBLIC_BASE_URL}/releases/stable/latest.json}"
 WEBUI_UPDATE_PACKAGE_TYPE="${WEBUI_UPDATE_PACKAGE_TYPE:-source-deploy}"
 
+# Browser surface (docs/web-agent-browser/spec-01): deliberately NOT written to
+# SERVICE_ENV_FILE. The surface defaults to `local` and starts only when the
+# runtime hard gate passes on the device (MemTotal / MemAvailable / free disk /
+# resolvable browser executable), so an env value here would be a second source
+# of truth that silently overrides the gate. If a specific low-spec model must
+# stay off, write an explicit off for it right here and record the reason.
+_browser_surface_guard() {
+  local var="HERMES_BROWSER_SURFACE"
+  local value="${!var:-}"
+  case "${value,,}" in
+    ""|local|off)
+      ;;
+    *)
+      echo "[deploy] WARN: ${var}=${value} is not off|local; the server will treat it as off" >&2
+      ;;
+  esac
+}
+_browser_surface_guard
+
 # Update-source hardening (task-12; the v0.8.6 candidate-pin incident):
 # a WEBUI_UPDATE_MANIFEST_URL/URLS pinned to a versioned
 # `releases/vX.Y.Z/manifest.json` or a `candidates/<channel>/<version>.json`

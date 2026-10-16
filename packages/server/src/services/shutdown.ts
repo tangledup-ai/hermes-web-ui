@@ -7,6 +7,8 @@ import { stopPeriodicGatewayReaper } from './hermes/gateway-autostart'
 import { shutdownLocalSttRuntime } from './hermes/local-stt-model-manager'
 import { stopOutboundRelayClient } from './global-agent/outbound-relay-client'
 import { stopUSBService } from './usb'
+import { stopHeadlessBrowserRuntime } from './browser/runtime'
+import { stopWebBrowserBroker } from './browser/broker-instance'
 import { stopAppRelayClient } from './app-relay/client'
 import { closeGlobalEkkoAgent } from './ekko-agent/manager'
 import { stopChatWebhookDispatcher } from './hermes/chat-webhooks'
@@ -140,6 +142,23 @@ export function createShutdownHandler(server: any, groupChatServer?: any, chatRu
         logger.info('USB service stopped')
       } catch (err) {
         logger.warn(err, 'Failed to stop USB service (non-fatal)')
+      }
+
+      // spec-05/spec-02: the broker and the headless browser runtime are owned
+      // by the server, so they must not outlive it. The broker removes only its
+      // own descriptor file; the runtime is bounded by stopTimeoutMs (5s) + 1s.
+      try {
+        await stopWebBrowserBroker()
+        logger.info('Web browser broker stopped')
+      } catch (err) {
+        logger.warn(err, 'Failed to stop the web browser broker (non-fatal)')
+      }
+
+      try {
+        await stopHeadlessBrowserRuntime()
+        logger.info('Headless browser runtime stopped')
+      } catch (err) {
+        logger.warn(err, 'Failed to stop headless browser runtime (non-fatal)')
       }
 
       try {
