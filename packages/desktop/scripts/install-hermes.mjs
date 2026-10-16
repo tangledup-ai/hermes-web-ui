@@ -145,13 +145,19 @@ function installHermesPythonRuntime() {
     run('uv', exportArgs, { cwd: PY_DIR, env })
 
     console.log('→ Installing hash-verified Hermes dependencies into bundled Python')
+    // Run from the lock temp dir, not PY_DIR. Resolving while cwd is PY_DIR makes
+    // uv pick up [tool.uv] override-dependencies from pyproject.toml, which
+    // re-resolves the dependency graph and selects versions newer than the
+    // hash-locked requirements.txt (e.g. cryptography 50.0.2 instead of the
+    // pinned 50.0.0). Those newer versions carry no hash, so --require-hashes
+    // aborts the install. The lock file is the source of truth here.
     run('uv', [
       'pip', 'install',
       '--python', pyBin,
       '--require-hashes',
       '--no-deps',
       '--requirement', requirementsPath,
-    ], { cwd: PY_DIR, env })
+    ], { cwd: tempRoot, env })
 
     console.log('→ Installing Hermes source as a relocatable editable project')
     run('uv', [
@@ -472,8 +478,17 @@ function installBrowserRuntime() {
     process.exit(1)
   }
 
-  console.log(`→ Installing Chromium for bundled agent-browser at ${AGENT_BROWSER_HOME}`)
-  runInvocation(commandInvocation(ab), ['install'], { env: browserRuntimeEnv() })
+  // Reuse an already-populated browser bundle when one is present. Reinstalling
+  // would re-download Chrome from storage.googleapis.com, which is unusable from
+  // behind the GFW (it stalls at ~30MB and fails all three retries). A pre-seeded
+  // bundle under AGENT_BROWSER_HOME/browsers/<chrome-version> is enough to proceed.
+  const preexistingBrowser = findBundledBrowserExecutable()
+  if (preexistingBrowser) {
+    console.log(`✓ reusing existing browser bundle at ${preexistingBrowser}`)
+  } else {
+    console.log(`→ Installing Chromium for bundled agent-browser at ${AGENT_BROWSER_HOME}`)
+    runInvocation(commandInvocation(ab), ['install'], { env: browserRuntimeEnv() })
+  }
   pinChromeForTestingBundle()
 
   const browserExecutable = ensureBundledBrowserExecutable()
