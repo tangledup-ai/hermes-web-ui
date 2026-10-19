@@ -24,6 +24,7 @@ import { resetDesktopDefaultLogin } from './desktop-login-reset'
 import { installHermesStudioCliShim, installHermesStudioMcpShim } from './cli-shim'
 import { parseHermesCliArgs, runBundledHermesCli } from './hermes-cli'
 import { installSelectionContextMenu } from './selection-context-menu'
+import { ensureBrowserUseCliShim, ensureHermesAutomationBrowser, stopHermesAutomationBrowser } from './hermes-browser'
 import { groupChatAgentLinkPopupResponse } from './group-chat-agent-popup'
 import {
   ensureDesktopRuntime,
@@ -137,6 +138,7 @@ async function prepareAppShutdown(): Promise<void> {
       await browserManager?.destroy().catch(() => undefined)
       browserBroker = null
       browserManager = null
+      await stopHermesAutomationBrowser().catch(() => undefined)
       await stopWebUiServer().catch(() => undefined)
     })()
   }
@@ -821,6 +823,15 @@ async function bootstrap(source?: RuntimeDownloadSource) {
     isBootstrapping = false
     return
   }
+
+  // Browser automation has to be ready before the server spawns: the server
+  // inherits this process env, and the bundled Hermes Agent only sees
+  // BROWSER_CDP_URL if it is set at spawn time. Failure here is non-fatal —
+  // chat keeps working and the agent reports a clear browser error.
+  ensureBrowserUseCliShim()
+  await ensureHermesAutomationBrowser().catch(error => {
+    console.warn('[browser] automation browser setup failed:', error)
+  })
 
   if (!hermesBinExists()) {
     console.error(`hermes binary missing at ${hermesBin()}`)

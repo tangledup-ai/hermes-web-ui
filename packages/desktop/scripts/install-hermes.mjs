@@ -59,6 +59,34 @@ const NODE_DIR = resolve(ROOT, 'resources', 'node', `${OS_LABEL}-${TARGET_ARCH}`
 const NODE_PREFIX = resolve(PY_DIR, 'node')
 const AGENT_BROWSER_HOME = resolve(PY_DIR, 'agent-browser')
 const PLAYWRIGHT_BROWSERS_PATH = resolve(PY_DIR, 'ms-playwright')
+// The agent's browser_exec tool shells out to the browser-use CLI. It has to be
+// provisioned at build time: letting the agent resolve it through `uvx` at first
+// use turns one browser step into a multi-minute dependency install that the
+// tool's 120-300s exec timeout kills mid-flight, so the cache never warms up
+// and every retry starts over.
+const BROWSER_USE_VERSION = (process.env.HERMES_BROWSER_USE_VERSION || '0.13.11').trim()
+const BROWSER_USE_DIR = resolve(PY_DIR, 'browser-use')
+const BROWSER_USE_LAUNCHER_SOURCE = [
+  '"""Launch the bundled Browser Use CLI for the Hermes Agent.',
+  '',
+  'Hermes browser_exec looks for an executable named "browser-use" and feeds it',
+  'the Python snippet on stdin. The desktop app writes that shim at startup (see',
+  'packages/desktop/src/main/hermes-browser.ts) instead of shipping a launcher',
+  'with an absolute interpreter path baked in: the runtime directory changes',
+  'between installs and upgrades, so a copied console-script wrapper would keep',
+  'pointing at the previous interpreter.',
+  '"""',
+  'import os',
+  'import sys',
+  '',
+  'sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))',
+  '',
+  'from browser_use.cli import main',
+  '',
+  'if __name__ == "__main__":',
+  '    sys.exit(main() or 0)',
+  '',
+].join('\n')
 
 const pyBin = venvPythonPath(VENV_DIR, TARGET_OS)
 
@@ -172,6 +200,27 @@ function installHermesPythonRuntime() {
   }
 
   makeEditableInstallRelocatable()
+
+  if (!SKIP_BROWSER_RUNTIME) installBrowserUseCli(env)
+}
+
+function installBrowserUseCli(env) {
+  console.log(`→ Installing browser-use CLI ${BROWSER_USE_VERSION} into ${BROWSER_USE_DIR}`)
+  rmSync(BROWSER_USE_DIR, { recursive: true, force: true })
+  // Isolated --target instead of the shared venv: browser-use pins older
+  // httpx/anthropic than the agent's hash-locked requirements, so installing it
+  // into venv/ downgrades packages the agent itself runs on.
+  run('uv', [
+    'pip', 'install',
+    '--python', pyBin,
+    '--target', BROWSER_USE_DIR,
+    `browser-use==${BROWSER_USE_VERSION}`,
+  ], { cwd: tmpdir(), env })
+
+  const launcher = resolve(BROWSER_USE_DIR, 'run_cli.py')
+  writeFileSync(launcher, BROWSER_USE_LAUNCHER_SOURCE)
+  console.log('→ Verifying the bundled browser-use CLI')
+  run(pyBin, [launcher, '--version'], { env })
 }
 
 function npmCommand() {
