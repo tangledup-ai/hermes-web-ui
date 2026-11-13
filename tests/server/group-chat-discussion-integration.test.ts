@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { io, type Socket } from 'socket.io-client'
+import { WebSocket, WebSocketServer } from 'ws'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 const database = vi.hoisted(() => {
@@ -21,12 +22,13 @@ const row = (roomId: string, status = 'running'): DiscussionRow => ({
 
 describe('discussion integration with the upstream group runtime', () => {
   const http = createServer()
+  const secondary = createServer()
   let group: GroupChatServer
   let client: Socket
   beforeAll(async () => {
     initAllHermesTables()
-    group = new GroupChatServer(http)
-    await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve))
+    group = new GroupChatServer([http, secondary])
+    await Promise.all([http, secondary].map(server => new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))))
     const address = http.address() as { port: number }
     const storage = group.getStorage()
     storage.saveRoom('room', 'Room', 'INVITE')
@@ -42,7 +44,35 @@ describe('discussion integration with the upstream group runtime', () => {
   afterAll(async () => {
     client?.disconnect()
     if (group) await new Promise<void>(resolve => group.getIO().close(() => resolve()))
+    if (http.listening) await new Promise<void>(resolve => http.close(() => resolve()))
     database.close()
+  })
+
+  it('leaves pending voice upgrades alone on both HTTP listeners', async () => {
+    const voice = new WebSocketServer({ noServer: true })
+    const onUpgrade: Parameters<typeof http.on<'upgrade'>>[1] = (req, socket, head) => {
+      if (req.url !== '/ws/omni-realtime') return
+      // Wait longer than Engine.IO's default 1-second unrelated upgrade timer.
+      setTimeout(() => {
+        if (socket.destroyed) return
+        voice.handleUpgrade(req, socket, head, client => client.send('ready'))
+      }, 1_150)
+    }
+    for (const server of [http, secondary]) server.on('upgrade', onUpgrade)
+    const sockets = [http, secondary].map(server =>
+      new WebSocket(`ws://127.0.0.1:${(server.address() as { port: number }).port}/ws/omni-realtime`))
+    try {
+      const messages = await Promise.all(sockets.map(socket => new Promise<string>((resolve, reject) => {
+        socket.once('message', message => resolve(String(message)))
+        socket.once('error', reject)
+      })))
+      expect(messages).toEqual(['ready', 'ready'])
+    } finally {
+      for (const server of [http, secondary]) server.off('upgrade', onUpgrade)
+      for (const socket of sockets) socket.terminate()
+      for (const socket of voice.clients) socket.terminate()
+      voice.close()
+    }
   })
 
   it('persists one discussion per room and excludes tool plumbing from the speech budget', () => {
