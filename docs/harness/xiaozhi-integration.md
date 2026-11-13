@@ -36,6 +36,9 @@ Do not reset all NVS or erase Wi-Fi credentials just to change the server addres
 - MCU Ekko runs explicitly supply the profile's provider, model, and API mode.
 - Gateway automatic listening must detect the speech endpoint; manual mode still
   waits for `listen.stop`. Both modes have a 32-second gateway capture limit.
+- With Ekko LAN negotiation, the gateway combines two 60 ms device frames in
+  each 120 ms Studio upload chunk and flushes any final partial chunk. Downlink
+  Opus encoding runs one frame at a time at playback pace.
 - When an Agent finishes without speakable text or a pending background task,
   the MCU receives a failure status. This lets the user distinguish a model
   that produced only internal reasoning from a completed spoken turn.
