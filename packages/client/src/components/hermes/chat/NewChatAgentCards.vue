@@ -13,124 +13,45 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:value': [value: AgentOption['value']] }>()
 const { t } = useI18n()
 const viewport = ref<HTMLElement>()
-const effects = ref<HTMLElement>()
 const loop = computed(() => props.options.length > 5)
 const cards = computed(() => Array.from({ length: loop.value ? 3 : 1 }, () => props.options).flat())
 const activePosition = ref(0)
-type EmberEdge = 'left' | 'right' | 'top' | 'bottom'
-const random = (min: number, max: number) => min + Math.random() * (max - min)
+const effectsPaused = ref(false)
+let motionQuery: MediaQueryList | undefined
+
+// Decorative motion belongs to the browser animation engine. Only set up
+// ember paths once; no per-frame geometry reads or inline style changes.
 const emberSlots = (['left', 'right', 'top', 'bottom'] as const).flatMap(edge => {
   const count = edge === 'bottom' ? 3 : 7
-  return Array.from({ length: count }, (_, slot) => ({ edge, slot, count }))
-})
-let motionQuery: MediaQueryList | undefined
-function createEmber(edge: EmberEdge, slot: number, count: number) {
-  const outward = edge === 'left' ? -1 : edge === 'right' ? 1 : 0
-  const reduced = motionQuery?.matches
-  return {
-    position: (slot + random(.12, .88)) / count,
-    inset: random(3, 7), size: random(2.2, 3.4), brightness: random(.7, 1),
-    rise: reduced ? random(24, 36) : random(32, 48),
-    duration: reduced ? random(4600, 6800) : random(3000, 5600),
-    phase: random(0, 5600), cycle: -1,
-    wind: [0, ...Array.from({ length: 5 }, () => outward ? outward * random(1, 10) : random(-10, 10))],
-  }
-}
-function createEmbers() { return emberSlots.map(ember => createEmber(ember.edge, ember.slot, ember.count)) }
-let embers = createEmbers()
-let effectFrame: number | null = null
-let effectBounds = ''
-let effectCard: HTMLElement | null = null
-let halos: HTMLElement[] = []
-let rim: HTMLElement | null = null
-let foil: HTMLElement | null = null
-let foilBeams: HTMLElement[] = []
-let sweep: HTMLElement | null = null
-let emberElements: HTMLElement[] = []
-
-function paintCardInterior(now: number) {
-  // Ambient foil uses the same speed regardless of the system motion preference.
-  const seconds = now / 1000
-  const phase = seconds / 8 * Math.PI * 2
-  const x = Math.sin(phase), y = Math.cos(phase)
-  if (foil) foil.style.transform = `translate(${7 * x}%, ${5 * y}%) rotate(${24 * x}deg) scale(1.08)`
-  foilBeams.forEach((beam, index) => {
-    beam.style.transform = `translateX(${(index ? -1 : 1) * 13 * x}%) rotate(${29 + 7 * y}deg)`
-    beam.style.opacity = String(.25 + (index ? .2 : .5) * (1 + y) / 2)
-  })
-  if (sweep) {
-    const progress = (seconds / 4 + .2) % 1
-    sweep.style.transform = `translateX(${-72 + 144 * progress}%)`
-    sweep.style.opacity = String(.2 + .45 * Math.sin(progress * Math.PI))
-  }
-}
-
-function paintEffects(now: number) {
-  // A foreground layer and numeric transforms also work with desktop CSS animations disabled.
-  const layer = effects.value
-  const card = viewport.value?.querySelector<HTMLElement>('.agent-card.active')
-  if (!layer || !card) return
-  if (effectCard !== card) {
-    effectCard = card
-    halos = Array.from(card.querySelectorAll<HTMLElement>('.agent-card-halo'))
-    rim = card.querySelector<HTMLElement>('.agent-card-rim')
-    foil = card.querySelector<HTMLElement>('.agent-card-foil')
-    foilBeams = Array.from(card.querySelectorAll<HTMLElement>('.agent-card-foil-beam'))
-    sweep = card.querySelector<HTMLElement>('.agent-card-sweep')
-  }
-  const root = layer.parentElement!.getBoundingClientRect()
-  const rect = card.getBoundingClientRect()
-  const bounds = `${rect.left - root.left}:${rect.top - root.top}:${rect.width}:${rect.height}`
-  if (bounds !== effectBounds) {
-    effectBounds = bounds
-    Object.assign(layer.style, { left: `${rect.left - root.left}px`, top: `${rect.top - root.top}px`,
-      width: `${rect.width}px`, height: `${rect.height}px` })
-  }
-  emberElements.forEach((element, index) => {
-    const { edge, slot, count } = emberSlots[index]
-    let ember = embers[index]
-    const elapsed = now + ember.phase
-    const cycle = Math.floor(elapsed / ember.duration)
-    if (ember.cycle !== cycle) {
-      const path = createEmber(edge, slot, count)
-      ember = embers[index] = { ...path, duration: ember.duration, phase: ember.phase, cycle }
-      element.style.width = element.style.height = `${ember.size}px`
+  return Array.from({ length: count }, (_, slot) => {
+    const random = (min: number, max: number) => min + Math.random() * (max - min)
+    const position = (slot + random(.12, .88)) / count
+    const inset = random(3, 7)
+    const left = edge === 'left' ? `-${inset}px` : edge === 'right' ? `calc(100% + ${inset}px)` : `${position * 100}%`
+    const top = edge === 'top' ? `-${inset}px` : edge === 'bottom' ? `calc(100% + ${inset}px)` : `${position * 100}%`
+    const size = random(2.2, 3.4)
+    return {
+      id: `${edge}-${slot}`,
+      style: {
+        left, top, width: `${size}px`, height: `${size}px`,
+        '--ember-rise': `-${random(32, 48)}px`,
+        '--ember-drift': `${edge === 'left' ? -random(1, 10) : edge === 'right' ? random(1, 10) : random(-10, 10)}px`,
+        '--ember-brightness': random(.7, 1),
+        animationDuration: `${random(3000, 5600)}ms`,
+        animationDelay: `-${random(0, 5600)}ms`,
+      },
     }
-    const progress = elapsed / ember.duration - cycle
-    const segment = Math.min(4, Math.floor(progress * 5))
-    const drift = ember.wind[segment] + (ember.wind[segment + 1] - ember.wind[segment]) * (progress * 5 - segment)
-    const x = edge === 'left' ? -ember.inset : edge === 'right' ? rect.width + ember.inset : rect.width * ember.position
-    const y = edge === 'top' ? -ember.inset : edge === 'bottom' ? rect.height + ember.inset : rect.height * ember.position
-    const opacity = progress < .08 ? 0 : progress < .22 ? (progress - .08) / .14 : (1 - progress) / .78
-    element.style.opacity = String(opacity * ember.brightness)
-    element.style.transform = `translate(${x + drift}px, ${y + 4 - (ember.rise + 4) * progress}px) scale(${.4 + Math.sin(progress * Math.PI) * .6})`
   })
-  const pace = motionQuery?.matches ? .65 : 1
-  const pulse = (Math.sin(now / 4800 * Math.PI * 2 * pace) + 1) / 2
-  if (halos[0]) halos[0].style.opacity = String(.24 + pulse * .16)
-  if (halos[1]) halos[1].style.opacity = String(.1 + (1 - pulse) * .08)
-  if (rim) rim.style.backgroundPosition = `${100 - pulse * 100}% ${20 + pulse * 60}%`
-  paintCardInterior(now)
-}
+})
 
-function animateEffects(now: number) {
-  effectFrame = null
-  if (document.hidden) return
-  paintEffects(now)
-  effectFrame = requestAnimationFrame(animateEffects)
-}
 function syncEffectVisibility() {
-  if (document.hidden) {
-    stopPointerDrag()
-    if (effectFrame !== null) cancelAnimationFrame(effectFrame)
-    effectFrame = null
-  } else if (effectFrame === null) effectFrame = requestAnimationFrame(animateEffects)
+  effectsPaused.value = document.hidden
+  if (document.hidden) stopPointerDrag()
 }
-function syncEffectMotion() { embers = createEmbers() }
 
 function onCardPointerMove(event: PointerEvent, position: number) {
   if (event.pointerType !== 'mouse' || position !== activePosition.value || pointer?.moved || props.disabled) return
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (motionQuery?.matches) return
   const card = event.currentTarget as HTMLElement
   const rect = card.getBoundingClientRect()
   const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
@@ -167,7 +88,7 @@ function center(position: number, smooth = false) {
   centeredLayout = { width: el.clientWidth, height: el.clientHeight, cardWidth: slot.offsetWidth }
   clearTimeout(selectionTimer)
   el.scrollTo({ left: slot.offsetLeft + slot.offsetWidth / 2 - el.clientWidth / 2,
-    behavior: smooth && !window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'instant' })
+    behavior: smooth && !motionQuery?.matches ? 'smooth' : 'instant' })
   selectionTimer = setTimeout(() => { finishScroll(); movingTo = null }, smooth ? 1200 : 50)
 }
 
@@ -321,7 +242,6 @@ function onKeydown(event: KeyboardEvent) {
 watch(() => props.value, () => {
   if (cards.value[activePosition.value]?.value !== props.value) void syncSelection()
 })
-watch(activePosition, syncEffectMotion)
 watch(() => props.options, () => {
   activePosition.value = Math.max(0, props.options.findIndex(option => option.value === props.value))
     + (loop.value ? props.options.length : 0)
@@ -331,14 +251,11 @@ onMounted(() => {
   observer = new ResizeObserver(() => { void syncSelection() })
   if (viewport.value) observer.observe(viewport.value)
   motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
-  motionQuery.addEventListener('change', syncEffectMotion)
   // Listen before bubbling can be stopped by controls outside the card row.
   window.addEventListener('pointerup', onPointerUp, true)
   window.addEventListener('pointercancel', onPointerUp, true)
   window.addEventListener('blur', stopPointerDrag)
   document.addEventListener('visibilitychange', syncEffectVisibility)
-  emberElements = Array.from(effects.value?.querySelectorAll<HTMLElement>('.agent-card-ember') || [])
-  syncEffectMotion()
   syncEffectVisibility()
   void syncSelection()
 })
@@ -346,8 +263,6 @@ onUnmounted(() => {
   stopPointerDrag()
   observer?.disconnect(); clearTimeout(selectionTimer)
   if (rebaseFrame !== undefined) cancelAnimationFrame(rebaseFrame)
-  if (effectFrame !== null) cancelAnimationFrame(effectFrame)
-  motionQuery?.removeEventListener('change', syncEffectMotion)
   window.removeEventListener('pointerup', onPointerUp, true)
   window.removeEventListener('pointercancel', onPointerUp, true)
   window.removeEventListener('blur', stopPointerDrag)
@@ -356,7 +271,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="agent-cards" :aria-label="t('chat.agent')" :aria-busy="loading">
+  <div class="agent-cards" :class="{ 'agent-cards--paused': effectsPaused }" :aria-label="t('chat.agent')" :aria-busy="loading">
     <div ref="viewport" class="agent-card-viewport" @scroll.passive="onScroll" @scrollend="finishScroll" @wheel="onWheel" @keydown="onKeydown"
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @lostpointercapture="onPointerUp">
       <div class="agent-card-track">
@@ -382,13 +297,13 @@ onUnmounted(() => {
               <span class="agent-card-glare" aria-hidden="true"></span>
             </span>
             <span class="agent-card-rim" aria-hidden="true"></span>
+            <span v-if="position === activePosition" class="agent-card-effects" aria-hidden="true">
+              <i v-for="ember in emberSlots" :key="ember.id" class="agent-card-ember" :style="ember.style"></i>
+            </span>
           </button>
         </div>
       </div>
     </div>
-    <span ref="effects" class="agent-card-effects" aria-hidden="true">
-      <i v-for="ember in emberSlots" :key="`${ember.edge}-${ember.slot}`" class="agent-card-ember" :data-edge="ember.edge"></i>
-    </span>
   </div>
 </template>
 
@@ -455,15 +370,23 @@ onUnmounted(() => {
     inset: -6px; border-radius: 26px; background: #ffdb86; filter: blur(14px); opacity: .14;
   }
 }
-.agent-card-effects { position: absolute; z-index: 12; pointer-events: none; }
+.agent-card-effects { position: absolute; inset: 0; z-index: 12; pointer-events: none; }
 .agent-card-ember {
   position: absolute; left: 0; top: 0; width: 3px; height: 3px; border-radius: 50%; pointer-events: none;
   background: #f4c45e; box-shadow: 0 0 4px 1px #d79c3d88; opacity: 0;
+  animation: agent-card-ember-rise 4s linear infinite;
+}
+@keyframes agent-card-ember-rise {
+  0% { transform: translateY(4px) scale(.4); opacity: 0; }
+  8% { opacity: 0; }
+  22% { opacity: var(--ember-brightness); }
+  50% { transform: translate(calc(var(--ember-drift) / 2), calc(var(--ember-rise) / 2)) scale(1); }
+  100% { transform: translate(var(--ember-drift), var(--ember-rise)) scale(.4); opacity: 0; }
 }
 .agent-card-rim {
   position: absolute; inset: 0; z-index: 9; padding: 3px; border-radius: inherit; pointer-events: none;
   background: linear-gradient(115deg, transparent 24%, #fffce3 32%, #fff4b9 35%, transparent 43%, transparent 66%, #fff5c466 72%, transparent 80%);
-  background-size: 300% 200%;
+  background-size: 300% 200%; background-position: 55% 45%;
   mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); mask-composite: exclude;
   opacity: 0; transition: opacity .45s;
   .active & { opacity: .9; }
@@ -500,7 +423,7 @@ onUnmounted(() => {
     #f0ddac55 229deg, #34392e00 260deg, #c3d1bd55 315deg, #313a2e00);
   mix-blend-mode: screen; filter: blur(calc(var(--card-width) * .009));
   opacity: .55; transition: opacity .45s;
-  .active & { opacity: .86; will-change: transform; }
+  .active & { opacity: .86; animation: agent-card-foil-drift 8s ease-in-out infinite; }
   .active:hover & { opacity: .95; }
 }
 .agent-card-foil-beam {
@@ -508,14 +431,34 @@ onUnmounted(() => {
   background: linear-gradient(90deg, transparent, #fff9e322 1%, transparent 3%, #d6efdf35 44%, #fffbe277 47%, transparent 48%);
   transform: rotate(29deg); opacity: .45;
   &.second { left: -44%; top: -22%; opacity: .25; }
-  .active & { will-change: transform, opacity; }
+  .active & { animation: agent-card-beam-drift 8s ease-in-out infinite alternate; }
+  .active &.second { animation-direction: alternate-reverse; }
 }
 .agent-card-sweep {
   position: absolute; inset: 0; z-index: 2; pointer-events: none; opacity: .2;
   background: linear-gradient(112deg, transparent 30%, #fffbea55 45%, #fffffaaa 49%, #e0f6e944 53%, transparent 64%);
   transform: translateX(-43.2%);
-  .active & { will-change: transform, opacity; }
+  .active & { animation: agent-card-sweep-across 4s linear infinite; }
 }
+@keyframes agent-card-foil-drift {
+  0%, 100% { transform: translateY(5%) rotate(0) scale(1.08); }
+  25% { transform: translateX(7%) rotate(24deg) scale(1.08); }
+  50% { transform: translateY(-5%) rotate(0) scale(1.08); }
+  75% { transform: translateX(-7%) rotate(-24deg) scale(1.08); }
+}
+@keyframes agent-card-beam-drift {
+  from { transform: translateX(-13%) rotate(22deg); opacity: .25; }
+  to { transform: translateX(13%) rotate(36deg); opacity: .6; }
+}
+@keyframes agent-card-sweep-across {
+  0% { transform: translateX(-72%); opacity: .2; }
+  50% { opacity: .65; }
+  100% { transform: translateX(72%); opacity: .2; }
+}
+.agent-cards--paused .agent-card-ember,
+.agent-cards--paused .active .agent-card-foil,
+.agent-cards--paused .active .agent-card-foil-beam,
+.agent-cards--paused .active .agent-card-sweep { animation-play-state: paused; }
 .agent-card-glare {
   position: absolute; inset: 0; z-index: 8; pointer-events: none; border-radius: inherit;
   background: radial-gradient(ellipse at var(--mx) var(--my), #ffffff75, transparent 60%);
@@ -556,5 +499,9 @@ onUnmounted(() => {
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-card, .agent-card-stone { transition: none; }
+  .agent-card-effects { display: none; }
+  .active .agent-card-foil,
+  .active .agent-card-foil-beam,
+  .active .agent-card-sweep { animation: none; }
 }
 </style>

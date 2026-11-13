@@ -61,14 +61,8 @@ import ChatInput from "./ChatInput.vue";
 import NewChatAgentCards from "./NewChatAgentCards.vue";
 import NewChatPage from "./NewChatPage.vue";
 import { prepareAgentDeployment, type AgentDeploymentController } from "./agentDeployment.mjs";
-import RealtimeVoiceStage from "./RealtimeVoiceStage.vue";
-import ConversationMonitorPane from "./ConversationMonitorPane.vue";
-import MessageList from "./MessageList.vue";
 import SessionListItem from "./SessionListItem.vue";
 import ListActionsMenu from "@/components/layout/ListActionsMenu.vue";
-import OutlinePanel from "./OutlinePanel.vue";
-import ChatToolsPanel from "./ChatToolsPanel.vue";
-import SubagentStreamPanel from "./SubagentStreamPanel.vue";
 import { chatSessionAgentAvatar } from "@/utils/chat-agent-avatar";
 import { isHermesSession } from "@/utils/hermes/session-agent";
 import { buildVisibleSessionCategoryGroups, partitionRecentSessions } from "./session-category-groups";
@@ -124,6 +118,12 @@ const AgentManagerPanel = defineAsyncComponent(async () => (await import('@/view
 const ModelsPanel = defineAsyncComponent(async () => (await import('@/views/hermes/ModelsView.vue')).default);
 const WorkspaceDiffPreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/WorkspaceDiffPreview.vue')).default);
 const FilePreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/FilePreview.vue')).default);
+const MessageList = defineAsyncComponent(() => import('./MessageList.vue'));
+const OutlinePanel = defineAsyncComponent(() => import('./OutlinePanel.vue'));
+const ChatToolsPanel = defineAsyncComponent(() => import('./ChatToolsPanel.vue'));
+const SubagentStreamPanel = defineAsyncComponent(() => import('./SubagentStreamPanel.vue'));
+const ConversationMonitorPane = defineAsyncComponent(() => import('./ConversationMonitorPane.vue'));
+const RealtimeVoiceStage = defineAsyncComponent(() => import('./RealtimeVoiceStage.vue'));
 
 const chatStore = useChatStore();
 const sessionStates = useSessionReadState(() => props.contentMode === 'chat' && !chatStore.isLoadingMessages ? chatStore.activeSessionId : null);
@@ -3163,6 +3163,7 @@ watch([isEmptySingleChat, () => route.fullPath], ([empty]) => {
             </NewChatPage>
             <template v-else>
             <MessageList
+              v-if="chatStore.activeSessionId"
               ref="messageListRef"
               :selection-actions-target="messageSelectionActionsTarget"
               :approval-portal-to-body="showRealtimeVoice"
@@ -3170,6 +3171,7 @@ watch([isEmptySingleChat, () => route.fullPath], ([empty]) => {
             />
             <ChatInput
               ref="chatInputRef"
+              class="session-composer"
               :model-label="activeSessionModelLabel"
               :model-disabled="activeSessionUsesGlobalCodingAgentConfig"
               :native-reasoning-efforts="activeSessionUsesGlobalCodingAgentConfig ? activeSessionNativeReasoningEfforts : undefined"
@@ -3654,6 +3656,10 @@ watch([isEmptySingleChat, () => route.fullPath], ([empty]) => {
   flex-direction: column;
   min-width: 0;
   background-color: var(--theme-content-bg, $bg-main-surface);
+}
+
+.session-composer {
+  margin-block-start: auto;
 }
 
 .chat-header {
