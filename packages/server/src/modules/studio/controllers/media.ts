@@ -37,7 +37,6 @@ const MINIMAX_VIDEO_REGIONS = {
   },
 } as const
 type MiniMaxVideoRegion = keyof typeof MINIMAX_VIDEO_REGIONS
-const APIKEY_IMAGE_PROVIDER = 'fun-codex'
 const APIKEY_IMAGE_MODEL = 'gpt-image-2'
 const APIKEY_IMAGE_TO_IMAGE_MODEL = 'gpt-5.4-mini'
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024
@@ -104,7 +103,7 @@ function readJsonFile(path: string): any {
 }
 
 function buildApiUrl(baseUrl: string, pathWithV1: string): string {
-  const base = (baseUrl || 'https://api.apikey.fan/v1').replace(/\/+$/, '')
+  const base = baseUrl.replace(/\/+$/, '')
   const apiPath = pathWithV1.startsWith('/') ? pathWithV1 : `/${pathWithV1}`
   if (!apiPath.startsWith('/v1/')) return `${base}${apiPath}`
 
@@ -131,19 +130,9 @@ function canonicalCustomProviderName(value: unknown): string {
 }
 
 function requestedApiKeyImageProviderName(body: any): string {
-  // No fallback to the built-in name here: resolveApiKeyImageProvider consults
-  // the profile's configured provider before reaching for the constant.
   return normalizeCustomProviderName(body?.provider || body?.provider_name || body?.custom_provider)
 }
 
-/**
- * Image generation and editing had their provider and models fixed in code, so
- * a profile pointed at a different image API could not be reached at all. The
- * values now come from the `auxiliary` section of the profile's config.yaml —
- * the same place every other per-task model lives — and the constants stay as
- * the last resort, so a profile that configures nothing behaves exactly as it
- * did before.
- */
 type AuxiliaryImageSettings = { provider: string; model: string; timeoutMs?: number }
 
 function auxiliaryImageSettings(hermesConfig: any, task: 'image_generation' | 'image_edit'): AuxiliaryImageSettings {
@@ -166,31 +155,21 @@ function apiKeyFromCustomProvider(provider: any): string {
   return envName ? String(process.env[envName] || '').trim() : ''
 }
 
-function resolveApiKeyImageProvider(
-  hermesConfig: any,
-  providerName = '',
-  configuredProviderName = '',
-): { provider: ApiKeyImageProvider | null; attemptedName: string } {
-  const requestedName = normalizeCustomProviderName(providerName)
-    || normalizeCustomProviderName(configuredProviderName)
-    || APIKEY_IMAGE_PROVIDER
+function resolveApiKeyImageProvider(hermesConfig: any, providerName: string): ApiKeyImageProvider | null {
   const customProviders = getCompatibleCustomProviders(hermesConfig)
-  const requestedKey = canonicalCustomProviderName(requestedName)
+  const requestedKey = canonicalCustomProviderName(providerName)
   const provider = customProviders.find(entry => (
     canonicalCustomProviderName(entry?.name) === requestedKey ||
     canonicalCustomProviderName(entry?.provider_key) === requestedKey
   ))
   const apiKey = apiKeyFromCustomProvider(provider)
   const baseUrl = String(provider?.base_url || '').trim()
-  if (!provider || !apiKey || !baseUrl) return { provider: null, attemptedName: requestedName }
+  if (!provider || !apiKey || !baseUrl) return null
   return {
-    attemptedName: requestedName,
-    provider: {
-      name: provider.name,
-      apiKey,
-      baseUrl,
-      model: String(provider.model || '').trim(),
-    },
+    name: provider.name,
+    apiKey,
+    baseUrl,
+    model: String(provider.model || '').trim(),
   }
 }
 
@@ -677,19 +656,25 @@ export async function apiKeyImageGenerate(ctx: Context) {
     const activeSettings = mode === 'image' ? editSettings : generationSettings
     const configuredProvider = activeSettings.provider
       || (mode === 'image' ? generationSettings.provider : editSettings.provider)
-    const providerName = requestedApiKeyImageProviderName(body)
-    const resolution = resolveApiKeyImageProvider(hermesConfig, providerName, configuredProvider)
-    if (!resolution.provider) {
-      ctx.status = 401
-      const isDefaultProvider = canonicalCustomProviderName(resolution.attemptedName) === APIKEY_IMAGE_PROVIDER
+    const providerName = requestedApiKeyImageProviderName(body) || normalizeCustomProviderName(configuredProvider)
+    if (!providerName) {
+      ctx.status = 400
       ctx.body = {
-        error: `Missing ${resolution.attemptedName} provider in profile "${profile}" config.yaml.`,
-        code: isDefaultProvider ? 'missing_fun_codex_provider' : 'missing_apikey_image_provider',
+        error: `Configure an auxiliary image provider in profile "${profile}" or select a configured provider for this request.`,
+        code: 'image_provider_not_configured',
+      }
+      return
+    }
+    const provider = resolveApiKeyImageProvider(hermesConfig, providerName)
+    if (!provider) {
+      ctx.status = 401
+      ctx.body = {
+        error: `Image provider "${providerName}" in profile "${profile}" needs a configured URL and API key.`,
+        code: 'missing_apikey_image_provider',
       }
       return
     }
 
-    const provider = resolution.provider
     const images = await requestApiKeyImage(
       provider,
       mode,

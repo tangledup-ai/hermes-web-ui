@@ -29,7 +29,7 @@ and timestamps. It contains no configuration contents or credentials.
 ## Adding a task
 
 1. Append a task with a permanent, descriptive ID such as
-   `2026-09-12-hermes-apikey-domain-v1`. Do not rename or reuse an executed ID.
+   `2026-11-13-studio-storage-layout-v1`. Do not rename or reuse an executed ID.
 2. Set `scope` to the data directory or another stable data identity. Use the
    Hermes root directory for Hermes operations and `config.appHome` for Studio
    operations. Changing data directories then creates a separate completion
@@ -43,9 +43,3 @@ and timestamps. It contains no configuration contents or credentials.
    its completion record.
 5. Add focused tests for the operation and run the startup-task runner tests,
    `npm run harness:check`, and `npm run build`.
-
-The initial registered task replaces old apikey domains in existing Hermes
-profiles. Completion is scoped to the Hermes root directory, not each profile.
-Once completed, later imports of old profiles into that same root are not
-rescanned. Changes that must run again need a new task ID or an explicit import
-upgrade step, rather than changing the implementation behind a completed ID.

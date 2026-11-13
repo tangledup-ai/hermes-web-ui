@@ -30,6 +30,7 @@ from .models import (
     AnalysisRequest, AnalysisResult, AnalysisStatus, DEFAULT_PROMPTS,
 )
 from .storage import storage
+from .transcription_context import TranscriptionContextMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +73,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(TranscriptionContextMiddleware)
 
 
 @app.get("/healthz")

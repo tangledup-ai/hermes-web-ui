@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .diarize_endpoint import diarize_ws_handler
 from .diarize_proxy import cleanup_session_files
+from .transcription_context import TranscriptionContextMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,6 +60,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(TranscriptionContextMiddleware)
 
 
 @app.get("/healthz")
@@ -76,8 +78,7 @@ async def healthz() -> dict[str, str]:
 @app.post("/api/cleanup/{session_id}")
 async def cleanup_session(session_id: str) -> dict[str, int]:
     """Manually cleanup OSS files for a given session."""
-    loop = asyncio.get_running_loop()
-    deleted_count = await loop.run_in_executor(None, cleanup_session_files, session_id)
+    deleted_count = await asyncio.to_thread(cleanup_session_files, session_id)
     return {"deleted_count": deleted_count}
 
 

@@ -9,7 +9,6 @@ export default defineConfig({
     alias: {
       '@': resolve(__dirname, 'packages/client/src'),
       '/logo.png': resolve(__dirname, 'packages/client/public/logo.png'),
-      '/relay-logo.png': resolve(__dirname, 'packages/client/public/relay-logo.png'),
     },
   },
   test: {

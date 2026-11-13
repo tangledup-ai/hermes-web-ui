@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   chatMock: vi.fn(),
   streamOutputMock: vi.fn(),
   destroyMock: vi.fn(),
+  interruptMock: vi.fn(),
   fetchMock: vi.fn(),
 }))
 
@@ -69,31 +70,30 @@ function wireBridge(): void {
     chat: mocks.chatMock,
     streamOutput: mocks.streamOutputMock,
     destroy: mocks.destroyMock,
+    interrupt: mocks.interruptMock,
   }))
   mocks.destroyMock.mockResolvedValue({ ok: true })
+  mocks.interruptMock.mockResolvedValue({ ok: true })
 }
 
 /** 构造一个最小 SSE reader，模拟直调 LLM 的流式响应体。 */
 function sseReader(payloads: string[]) {
   const encoder = new TextEncoder()
-  let i = 0
-  return {
-    read: async () => {
-      if (i >= payloads.length) return { done: true, value: undefined }
-      return { done: false, value: encoder.encode(payloads[i++]) }
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const payload of payloads) controller.enqueue(encoder.encode(payload))
+      controller.close()
     },
-  }
+  })
 }
 
 function stubDirectLLM(content: string): void {
   mocks.fetchMock.mockResolvedValue({
     ok: true,
-    body: {
-      getReader: () => sseReader([
-        `data: ${JSON.stringify({ choices: [{ delta: { content } }] }) }\n\n`,
-        'data: [DONE]\n\n',
-      ]),
-    },
+    body: sseReader([
+      `data: ${JSON.stringify({ choices: [{ delta: { content } }] }) }\n\n`,
+      'data: [DONE]\n\n',
+    ]),
   })
   vi.stubGlobal('fetch', mocks.fetchMock)
 }
@@ -127,7 +127,7 @@ describe('meeting report generation (agent-first with fallback)', () => {
     stubDirectLLM('SHOULD NOT BE USED')
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
-    const report = await collect(realtimeAssistService.generateReportStream('s1', 'transcript', 'general', 'default'))
+    const report = await collect(realtimeAssistService.generateReportStream('s1', 'transcript', 'general', { profile: 'default', agentType: 'hermes' }))
 
     expect(report).toBe('Agent Report')
     expect(mocks.chatMock).toHaveBeenCalledTimes(1)
@@ -137,7 +137,7 @@ describe('meeting report generation (agent-first with fallback)', () => {
     expect(chatArgs[4]).toBe('default')
     expect(mocks.fetchMock).not.toHaveBeenCalled()
     // 一次性会话结束后销毁。
-    expect(mocks.destroyMock).toHaveBeenCalledWith('meeting-report-s1', 'default')
+    expect(mocks.destroyMock).toHaveBeenCalledWith(expect.stringMatching(/^meeting-report-s1-/), 'default')
   })
 
   it('falls back to direct LLM when the bridge is unavailable and nothing was yielded', async () => {
@@ -146,7 +146,7 @@ describe('meeting report generation (agent-first with fallback)', () => {
     stubDirectLLM('Direct LLM Report')
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
-    const report = await collect(realtimeAssistService.generateReportStream('s2', 'transcript', 'general', 'default'))
+    const report = await collect(realtimeAssistService.generateReportStream('s2', 'transcript', 'general', { profile: 'default', agentType: 'hermes' }))
 
     expect(report).toBe('Direct LLM Report')
     expect(mocks.fetchMock).toHaveBeenCalledTimes(1)
@@ -171,7 +171,7 @@ describe('meeting report generation (agent-first with fallback)', () => {
 
     // 直接消费生成器，验证 sentinel 出现在 agent 部分与 LLM 部分之间。
     const seen: Array<string | symbol> = []
-    for await (const chunk of realtimeAssistService.generateReportStream('s3', 'transcript', 'general', 'default')) {
+    for await (const chunk of realtimeAssistService.generateReportStream('s3', 'transcript', 'general', { profile: 'default', agentType: 'hermes' })) {
       seen.push(chunk)
     }
 
@@ -193,10 +193,28 @@ describe('meeting report generation (agent-first with fallback)', () => {
     stubDirectLLM('SHOULD NOT BE USED')
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
-    const report = await collect(realtimeAssistService.generateReportStream('s4', 'transcript', 'general', 'default'))
+    const report = await collect(realtimeAssistService.generateReportStream('s4', 'transcript', 'general', { profile: 'default', agentType: 'hermes' }))
 
     expect(report).toBe('Final Report Text')
     expect(mocks.fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('interrupts a Hermes report that asks for approval and falls back', async () => {
+    wireBridge()
+    mocks.chatMock.mockResolvedValue({ run_id: 'approval-run' })
+    mocks.streamOutputMock.mockImplementation(async function* () {
+      yield { events: [{ event: 'approval.requested' }] }
+    })
+    stubDirectLLM('Recovered report')
+    const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
+    const report = await collect(realtimeAssistService.generateReportStream('approval', 'transcript', 'general', {
+      profile: 'default', agentType: 'hermes',
+    }))
+    expect(report).toBe('Recovered report')
+    expect(mocks.interruptMock).toHaveBeenCalledWith(expect.stringMatching(/^meeting-report-approval-/), 'Meeting report ended', 'default')
+    expect(mocks.chatMock.mock.calls[0][5]).toMatchObject({
+      background_delegation_enabled: false, storage_message: 'Generate meeting report',
+    })
   })
 
   it('throws when the direct LLM stream contains an in-band error frame', async () => {
@@ -207,18 +225,16 @@ describe('meeting report generation (agent-first with fallback)', () => {
     mocks.chatMock.mockRejectedValue(new Error('bridge unavailable'))
     mocks.fetchMock.mockResolvedValue({
       ok: true,
-      body: {
-        getReader: () => sseReader([
+      body: sseReader([
           `data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`,
           `data: ${JSON.stringify({ error: { message: 'Provider returned an empty stream with no finish_reason', type: 'upstream_error' } })}\n\n`,
         ]),
-      },
     })
     vi.stubGlobal('fetch', mocks.fetchMock)
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
     const collected: string[] = []
-    const gen = realtimeAssistService.generateReportStream('s5', 'transcript', 'general', 'default')
+    const gen = realtimeAssistService.generateReportStream('s5', 'transcript', 'general', { profile: 'default', agentType: 'hermes' })
     await expect((async () => {
       for await (const c of gen) {
         // generator 现在会先 yield 一个 REPORT_FALLBACK_MARKER sentinel，
@@ -238,17 +254,15 @@ describe('meeting report generation (agent-first with fallback)', () => {
     const trailingChunk = `data: ${JSON.stringify({ choices: [{ delta: { content: 'tail' } }] })}`
     mocks.fetchMock.mockResolvedValue({
       ok: true,
-      body: {
-        getReader: () => sseReader([
+      body: sseReader([
           // 注意末尾没有 \n\n
           `data: ${JSON.stringify({ choices: [{ delta: { content: 'head' } }] })}\n\n${trailingChunk}`,
         ]),
-      },
     })
     vi.stubGlobal('fetch', mocks.fetchMock)
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
-    const report = await collect(realtimeAssistService.generateReportStream('s6', 'transcript', 'general', 'default'))
+    const report = await collect(realtimeAssistService.generateReportStream('s6', 'transcript', 'general', { profile: 'default', agentType: 'hermes' }))
 
     expect(report).toBe('headtail')
   })
@@ -259,16 +273,14 @@ describe('meeting report generation (agent-first with fallback)', () => {
     // fallback 路径产出一个 SSE error 帧 → 触发 generator 抛错。
     mocks.fetchMock.mockResolvedValue({
       ok: true,
-      body: {
-        getReader: () => sseReader([
+      body: sseReader([
           `data: ${JSON.stringify({ error: { message: 'Provider returned an empty stream with no finish_reason', type: 'upstream_error' } })}\n\n`,
         ]),
-      },
     })
     vi.stubGlobal('fetch', mocks.fetchMock)
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
-    const gen = realtimeAssistService.generateReportStream('s7', 'transcript', 'general', 'default')
+    const gen = realtimeAssistService.generateReportStream('s7', 'transcript', 'general', { profile: 'default', agentType: 'hermes' })
     let captured: unknown = null
     try {
       for await (const _chunk of gen) { /* no-op */ }
@@ -291,15 +303,13 @@ describe('meeting report generation (agent-first with fallback)', () => {
     mocks.fetchMock
       .mockResolvedValueOnce({
         ok: true,
-        body: {
-          getReader: () => sseReader(['data: [DONE]\n\n']),
-        },
+        body: sseReader(['data: [DONE]\n\n']),
       })
       .mockRejectedValueOnce(new Error('non-streaming fallback also down'))
     vi.stubGlobal('fetch', mocks.fetchMock)
 
     const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
-    const gen = realtimeAssistService.generateReportStream('s8', 'transcript', 'general', 'default')
+    const gen = realtimeAssistService.generateReportStream('s8', 'transcript', 'general', { profile: 'default', agentType: 'hermes' })
     let captured: unknown = null
     try {
       for await (const _chunk of gen) { /* no-op */ }
@@ -337,7 +347,7 @@ describe('meeting report generation (agent-first with fallback)', () => {
       '../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist'
     )
     const seen: Array<string | symbol> = []
-    for await (const chunk of realtimeAssistService.generateReportStream('s9', 'transcript', 'general', 'default')) {
+    for await (const chunk of realtimeAssistService.generateReportStream('s9', 'transcript', 'general', { profile: 'default', agentType: 'hermes' })) {
       seen.push(chunk)
     }
     // 关键断言：agent 的错误文本不应出现在最终输出里。

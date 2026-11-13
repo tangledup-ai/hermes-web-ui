@@ -14,6 +14,11 @@ import { useI18n } from 'vue-i18n'
 import { NAlert, NButton, NRadio, NRadioGroup, NSelect, NSwitch, NUpload } from 'naive-ui'
 import type { UploadFileInfo } from 'naive-ui'
 
+defineProps<{
+  minimaxConfigured?: boolean
+  dashscopeConfigured?: boolean
+}>()
+
 const engine = defineModel<'minimax' | 'qwen'>('engine', { default: 'minimax' })
 const diarize = defineModel<boolean>('diarize', { default: true })
 const speakerCount = defineModel<number>('speakerCount', { default: 0 })
@@ -50,13 +55,13 @@ function onUploadChange(options: { fileList: UploadFileInfo[] }) {
     <div class="form-item">
       <label class="form-label">{{ t('meeting.directEngine') }}</label>
       <NRadioGroup :value="engine" @update:value="onEngineChange">
-        <NRadio value="minimax">
+        <NRadio value="minimax" :disabled="!minimaxConfigured">
           <div class="radio-content">
             <span class="radio-title">{{ t('meeting.asrProviderMinimax') }}</span>
             <span class="radio-desc">{{ t('meeting.directEngineMinimaxDesc') }}</span>
           </div>
         </NRadio>
-        <NRadio value="qwen">
+        <NRadio value="qwen" :disabled="!dashscopeConfigured">
           <div class="radio-content">
             <span class="radio-title">{{ t('meeting.asrProviderDashscope') }}</span>
             <span class="radio-desc">{{ t('meeting.directEngineQwenDesc') }}</span>

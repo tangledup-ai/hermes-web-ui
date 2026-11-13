@@ -16,7 +16,7 @@ import {
 } from '@/api/studio/practice-report'
 import { getDownloadUrl } from '@/api/studio/download'
 import { uid, useChatStore, type Message } from '@/stores/hermes/chat'
-import { useMeetingStore } from '@/stores/hermes/meeting'
+import { getLegacyMeetingDashScopeKey } from '@/utils/meeting-transcription-settings'
 import { useRealtimeModelStore } from '@/stores/hermes/realtime-model'
 import {
   buildRealtimeInstructions,
@@ -81,7 +81,6 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const chatStore = useChatStore()
-const meetingStore = useMeetingStore()
 const realtimeModelStore = useRealtimeModelStore()
 
 // Tina is verified with the default qwen3.8 model. Other voices remain
@@ -640,7 +639,7 @@ async function ensureBackendAvailable(timeoutMs = 30_000): Promise<boolean> {
     const status = await meetingASRApi.getStatus()
     if (status.isRunning) return true
     await meetingASRApi.start({
-      dashscopeApiKey: meetingStore.asrConfig.dashscopeApiKey || realtimeModelStore.config.apiKey || undefined,
+      dashscopeApiKey: getLegacyMeetingDashScopeKey() || realtimeModelStore.config.apiKey || undefined,
     })
   } catch {
     // fall through to polling — status/start failures are surfaced below
@@ -1130,7 +1129,7 @@ watch(
 )
 
 function practiceApiKey(): string {
-  return realtimeModelStore.config.apiKey || meetingStore.asrConfig.dashscopeApiKey || ''
+  return realtimeModelStore.config.apiKey || getLegacyMeetingDashScopeKey() || ''
 }
 
 /** 素材清单（录音段数 / 画面帧数 / 是否开过摄像头）——报告与聊天消息的证据行。 */

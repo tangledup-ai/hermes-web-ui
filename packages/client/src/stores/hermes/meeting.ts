@@ -27,7 +27,7 @@ export interface MeetingSession {
    */
   asrProvider?: 'dashscope' | 'minimax'
   // 分析模型配置
-  analysisMode: 'hermes' | 'custom'
+  analysisMode: 'ekko' | 'hermes' | 'custom'
   hermesProfile?: string
   customProvider?: string
   customModel?: string
@@ -35,16 +35,8 @@ export interface MeetingSession {
   sceneTemplate: string
   // AI 实时分析记录（持久化）
   analysisRounds: AnalysisRoundRecord[]
-  // 分析触发配置
-  analysisTriggerMode: 'sentences' | 'time' | 'both'
-  analysisIntervalSentences: number
-  analysisIntervalSeconds: number
   // 音频时长（音频数据存 IndexedDB）
   audioDuration: number
-  // Agent 交互相关
-  agentSessionId?: string
-  agentMessages: AgentMessage[]
-  agentStatus: 'idle' | 'connecting' | 'running' | 'completed' | 'error'
   agentConfig: AgentConfig
   // 演讲评分场景（sceneTemplate === 'speech'）专属状态
   speechEval?: SpeechEvalState
@@ -81,28 +73,11 @@ export interface SpeechEvalState {
 }
 
 export interface AgentConfig {
-  agentType: 'hermes' | 'claude-code' | 'codex'
+  agentType: 'ekko' | 'hermes' | 'claude-code' | 'codex'
   profile?: string
   provider?: string
   model?: string
   codingAgentMode?: 'scoped' | 'global'
-}
-
-export interface AgentMessage {
-  id: string
-  role: 'user' | 'assistant' | 'tool' | 'system'
-  content: string
-  timestamp: number
-  toolName?: string
-  toolCallId?: string
-  toolStatus?: 'running' | 'done' | 'error'
-  toolArgs?: any
-  toolResult?: any
-  toolDuration?: number
-  toolPreview?: string
-  reasoning?: string
-  status?: 'sending' | 'sent' | 'error'
-  _expanded?: boolean
 }
 
 export interface TranscriptSentence {
@@ -152,38 +127,12 @@ export interface AnalysisResult {
   html_content?: string
 }
 
-export interface ASRConfig {
-  dashscopeApiKey: string
-  paraformerWsUrl: string
-  paraformerModel: string
-  sampleRate: number
-  languageHints: string
-  // Optional LLM analysis config (used when starting analysis on a transcript)
-  llmApiKey: string
-  llmBaseUrl: string
-  llmModel: string
-  // Optional OSS config (speaker diarization chunk-based flow)
-  ossBucket: string
-  ossAccessKeyId: string
-  ossAccessKeySecret: string
-  ossEndpoint: string
-  ossPathPrefix: string
-  // Optional MiniMax ASR provider config (https://platform.minimax.cn/docs/api-reference/speech-to-text).
-  // When `asrProvider === 'minimax'`, the meeting ASR backend will route
-  // audio through the MiniMax Speech-to-Text REST API instead of DashScope.
-  asrProvider: 'dashscope' | 'minimax'
-  minimaxApiKey: string
-  minimaxAsrModel: string
-  minimaxBaseUrl: string
-}
-
 export interface SpeakerEntry {
   id: string
   displayName: string
 }
 
 const STORAGE_KEY = 'hermes.meeting.sessions'
-const ASR_CONFIG_KEY = 'hermes.meeting.asrConfig'
 
 function generateId(): string {
   return `meeting-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -200,7 +149,6 @@ function loadSessions(): MeetingSession[] {
         speakers: s.speakers || [],
         analysisRounds: s.analysisRounds || [],
         audioChunks: undefined,
-        asrProvider: s.asrProvider === 'minimax' ? 'minimax' : 'dashscope',
       }))
     }
   } catch {}
@@ -265,61 +213,6 @@ function archiveOldSessions(sessions: MeetingSession[], protectId?: string | nul
   }
 }
 
-function loadASRConfig(): ASRConfig {
-  try {
-    const saved = localStorage.getItem(ASR_CONFIG_KEY)
-    if (saved) {
-      const parsed = JSON.parse(saved) as Partial<ASRConfig>
-      // Backfill defaults for fields added after first deploy so existing
-      // users don't see broken wizard fields on upgrade.
-      return {
-        dashscopeApiKey: parsed.dashscopeApiKey || '',
-        paraformerWsUrl: parsed.paraformerWsUrl || 'wss://dashscope.aliyuncs.com/api-ws/v1/inference',
-        paraformerModel: parsed.paraformerModel || 'paraformer-realtime-v2',
-        sampleRate: parsed.sampleRate || 16000,
-        languageHints: parsed.languageHints || 'zh,en',
-        llmApiKey: parsed.llmApiKey || '',
-        llmBaseUrl: parsed.llmBaseUrl || 'https://api.deepseek.com',
-        llmModel: parsed.llmModel || 'deepseek-chat',
-        ossBucket: parsed.ossBucket || '',
-        ossAccessKeyId: parsed.ossAccessKeyId || '',
-        ossAccessKeySecret: parsed.ossAccessKeySecret || '',
-        ossEndpoint: parsed.ossEndpoint || 'oss-cn-beijing.aliyuncs.com',
-        ossPathPrefix: parsed.ossPathPrefix || 'meeting-asr-uploads/',
-        asrProvider: parsed.asrProvider === 'minimax' ? 'minimax' : 'dashscope',
-        minimaxApiKey: parsed.minimaxApiKey || '',
-        minimaxAsrModel: parsed.minimaxAsrModel || 'asr-1.0',
-        minimaxBaseUrl: parsed.minimaxBaseUrl || 'https://api.minimaxi.com',
-      }
-    }
-  } catch {}
-  return {
-    dashscopeApiKey: '',
-    paraformerWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference',
-    paraformerModel: 'paraformer-realtime-v2',
-    sampleRate: 16000,
-    languageHints: 'zh,en',
-    llmApiKey: '',
-    llmBaseUrl: 'https://api.deepseek.com',
-    llmModel: 'deepseek-chat',
-    ossBucket: '',
-    ossAccessKeyId: '',
-    ossAccessKeySecret: '',
-    ossEndpoint: 'oss-cn-beijing.aliyuncs.com',
-    ossPathPrefix: 'meeting-asr-uploads/',
-    asrProvider: 'dashscope',
-    minimaxApiKey: '',
-    minimaxAsrModel: 'asr-1.0',
-    minimaxBaseUrl: 'https://api.minimaxi.com',
-  }
-}
-
-function saveASRConfig(config: ASRConfig) {
-  try {
-    localStorage.setItem(ASR_CONFIG_KEY, JSON.stringify(config))
-  } catch {}
-}
-
 export const useMeetingStore = defineStore('meeting', () => {
   const sessions = ref<MeetingSession[]>(loadSessions())
   const activeSessionId = ref<string | null>(null)
@@ -344,7 +237,7 @@ export const useMeetingStore = defineStore('meeting', () => {
      * is started.
      */
     asrProvider?: 'dashscope' | 'minimax'
-    analysisMode?: 'hermes' | 'custom'
+    analysisMode?: MeetingSession['analysisMode']
     hermesProfile?: string
     customProvider?: string
     customModel?: string
@@ -364,21 +257,16 @@ export const useMeetingStore = defineStore('meeting', () => {
       speakerMap: {},
       speakers: [],
       status: 'idle',
-      asrModel: options?.asrModel || 'paraformer-v2',
-      asrProvider: options?.asrProvider || 'dashscope',
-      analysisMode: options?.analysisMode || 'hermes',
+      asrModel: options?.asrModel,
+      asrProvider: options?.asrProvider,
+      analysisMode: options?.analysisMode || 'ekko',
       hermesProfile: options?.hermesProfile,
       customProvider: options?.customProvider,
       customModel: options?.customModel,
       sceneTemplate: options?.sceneTemplate || 'general',
       analysisRounds: [],
-      analysisTriggerMode: 'sentences',
-      analysisIntervalSentences: 10,
-      analysisIntervalSeconds: 60,
       audioDuration: 0,
-      agentMessages: [],
-      agentStatus: 'idle',
-      agentConfig: options?.agentConfig || { agentType: 'hermes', profile: 'default' },
+      agentConfig: options?.agentConfig || { agentType: 'ekko' },
     }
     sessions.value.unshift(session)
     activeSessionId.value = session.id
@@ -545,22 +433,6 @@ export const useMeetingStore = defineStore('meeting', () => {
     return entry?.displayName || speakerId
   }
 
-  // ASR 配置
-  const asrConfig = ref<ASRConfig>(loadASRConfig())
-
-  const hasASRConfig = computed(() => {
-    return !!asrConfig.value.dashscopeApiKey
-  })
-
-  const hasLLMConfig = computed(() => {
-    return !!asrConfig.value.llmApiKey
-  })
-
-  function updateASRConfig(config: Partial<ASRConfig>) {
-    asrConfig.value = { ...asrConfig.value, ...config }
-    saveASRConfig(asrConfig.value)
-  }
-
   // --- 服务端会议同步 (触摸屏设备端创建的会议) ---
   // 触摸屏 (keli) 把会议写入服务端 /api/studio/meeting-storage, Web UI 本地
   // localStorage 列表看不到这些会议; 这里把服务端会议合并进列表,
@@ -586,19 +458,17 @@ export const useMeetingStore = defineStore('meeting', () => {
           speakerMap: data.speakerMap || {},
           speakers: data.speakers || [],
           status: data.status || 'completed',
-          analysisMode: data.analysisMode || 'hermes',
+          analysisMode: data.analysisMode || 'ekko',
           hermesProfile: data.hermesProfile,
           customProvider: data.customProvider,
           customModel: data.customModel,
-          sceneTemplate: 'general',
-          analysisRounds: [],
-          analysisTriggerMode: 'sentences',
-          analysisIntervalSentences: 10,
-          analysisIntervalSeconds: 60,
+          sceneTemplate: data.sceneTemplate || 'general',
+          analysisRounds: data.analysisRounds || [],
           audioDuration: data.audioDuration || 0,
-          agentMessages: [],
-          agentStatus: 'idle',
-          agentConfig: { agentType: 'hermes', profile: data.hermesProfile || 'default' },
+          agentConfig: data.agentConfig || {
+            agentType: data.analysisMode === 'hermes' ? 'hermes' : 'ekko',
+            profile: data.hermesProfile,
+          },
         })
         added += 1
       }
@@ -616,9 +486,6 @@ export const useMeetingStore = defineStore('meeting', () => {
     activeSessionId,
     activeSession,
     sortedSessions,
-    asrConfig,
-    hasASRConfig,
-    hasLLMConfig,
     createSession,
     updateSession,
     deleteSession,
@@ -634,7 +501,6 @@ export const useMeetingStore = defineStore('meeting', () => {
     getAudioBlob,
     renameSpeaker,
     getSpeakerDisplayName,
-    updateASRConfig,
     syncSessionsFromServer,
   }
 })

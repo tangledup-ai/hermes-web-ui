@@ -122,6 +122,23 @@ describe('MeetingASRService backend staleness detection', () => {
     svc._backendCodeHash = 'abc123abc123abc1'
     expect(svc.status.codeHash).toBe('abc123abc123abc1')
   })
+
+  it('keeps a healthy child running when starting without legacy configuration', async () => {
+    const prevRunning = svc._isRunning
+    svc._isRunning = true
+    svc._backendCodeHash = svc.computeBackendCodeHash()
+    const push = vi.spyOn(svc, 'updateConfig')
+    const stop = vi.spyOn(svc, 'stop')
+    try {
+      await svc.start()
+      expect(push).not.toHaveBeenCalled()
+      expect(stop).not.toHaveBeenCalled()
+    } finally {
+      svc._isRunning = prevRunning
+      push.mockRestore()
+      stop.mockRestore()
+    }
+  })
 })
 
 /**

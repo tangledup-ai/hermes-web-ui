@@ -45,7 +45,7 @@ from typing import Any, Callable
 import httpx
 
 from .asr_minimax import _pcm_to_wav
-from .config import settings
+from .config import settings, transcription_owner
 from .diarize_proxy import DiarizeClient, parse_sentences, upload_wav_to_oss, _normalize_base_url
 from ._log_helper import log_skip
 
@@ -109,6 +109,7 @@ def start_transcription(
         "engine": engine,
         "diarize": bool(diarize),
         "created_at": time.time(),
+        "owner": transcription_owner.get(),
         "result": None,
         "error": None,
     }
@@ -128,7 +129,10 @@ def start_transcription(
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
-    return _jobs.get(job_id)
+    job = _jobs.get(job_id)
+    if job is None or job["owner"] != transcription_owner.get():
+        return None
+    return {key: value for key, value in job.items() if key != "owner"}
 
 
 def _update(job_id: str, **fields: Any) -> None:
@@ -463,27 +467,22 @@ async def _run_qwen_diarized(
 
     wav = _pcm_to_wav(pcm, SAMPLE_RATE)
     progress(0.25, "uploading_oss")
-    loop = asyncio.get_running_loop()
-    file_url = await loop.run_in_executor(
-        None, upload_wav_to_oss, wav, SAMPLE_RATE, session_id, 0,
-    )
+    file_url = await asyncio.to_thread(upload_wav_to_oss, wav, SAMPLE_RATE, session_id, 0)
     client = DiarizeClient()
     progress(0.4, "submitting")
-    task_id = await loop.run_in_executor(
-        None,
-        lambda: client.submit_chunk(
-            file_url=file_url,
-            language_hints=settings.language_hints_list(),
-            speaker_count=speaker_count or None,
-            diarization_enabled=True,
-        ),
+    task_id = await asyncio.to_thread(
+        client.submit_chunk,
+        file_url=file_url,
+        language_hints=settings.language_hints_list(),
+        speaker_count=speaker_count or None,
+        diarization_enabled=True,
     )
     progress(0.5, "polling")
-    task_data = await loop.run_in_executor(None, client.poll, task_id)
+    task_data = await asyncio.to_thread(client.poll, task_id)
     result_url = client.best_result_url(task_data)
     if not result_url:
         return {"text": "", "sentences": [], "speakers": [], "warnings": ["no_valid_speech"]}
-    transcript = await loop.run_in_executor(None, client.fetch_transcript, result_url)
+    transcript = await asyncio.to_thread(client.fetch_transcript, result_url)
     parsed, speakers = parse_sentences(transcript)
     sentences = [
         {

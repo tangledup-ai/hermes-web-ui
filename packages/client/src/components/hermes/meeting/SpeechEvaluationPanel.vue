@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import { ref, computed, toRef, watch, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NButton, NInput, NSpin, NTag, NTabPane, NTabs, NTooltip } from 'naive-ui'
@@ -179,7 +180,7 @@ watch(() => props.isRecording, async (recording) => {
         body: JSON.stringify({
           sessionId: props.sessionId,
           sceneTemplate: 'speech',
-          profile: session.value?.hermesProfile || undefined,
+          ...resolveMeetingAgent(session.value),
           speechContext: buildSpeechContext(),
         }),
       })

@@ -32,7 +32,7 @@ const router = createRouter({ history: createWebHashHistory(), routes: [
   { path: '/studio/plugin-agent-settings/:pluginId/:viewId?', name: 'studio.pluginAgentSettings', component: PluginPageView },
   { path: '/studio/plugins/:pluginId/:viewId?', name: 'studio.pluginPage', component: PluginPageView },
   { path: '/hermes/session/:id', component: placeholder },
-  ...['person', 'chat', 'groupChat', 'workflow', 'history', 'connections', 'agentManager', 'models', 'usage', 'apiRelay', 'settings', 'logs', 'performance', 'skillsUsage', 'theme', 'petdex', 'profiles', 'meeting', 'usb', 'devices', 'clientPlugins'].map(name => ({ path: '/hermes/' + name, name: 'hermes.' + name, component: name === 'agentManager' ? PluginAgentsPanel : placeholder })),
+  ...['person', 'chat', 'groupChat', 'workflow', 'history', 'connections', 'agentManager', 'models', 'usage', 'settings', 'logs', 'performance', 'skillsUsage', 'theme', 'petdex', 'profiles', 'meeting', 'usb', 'devices', 'clientPlugins'].map(name => ({ path: '/hermes/' + name, name: 'hermes.' + name, component: name === 'agentManager' ? PluginAgentsPanel : placeholder })),
 ] })
 const pinia = createPinia()
 await theme.setBrightness('light')

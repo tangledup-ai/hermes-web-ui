@@ -8,7 +8,7 @@ import { meetingASRApi } from '@/utils/meeting-asr-api'
 import { executeOmniTool, OMNI_REALTIME_TOOLS } from '@/api/studio/omni-tools'
 import { fetchMemory } from '@/api/hermes/skills'
 import { uid, useChatStore, type Message } from '@/stores/hermes/chat'
-import { useMeetingStore } from '@/stores/hermes/meeting'
+import { getLegacyMeetingDashScopeKey } from '@/utils/meeting-transcription-settings'
 import { useRealtimeModelStore } from '@/stores/hermes/realtime-model'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import {
@@ -44,7 +44,6 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const chatStore = useChatStore()
-const meetingStore = useMeetingStore()
 const realtimeModelStore = useRealtimeModelStore()
 const profilesStore = useProfilesStore()
 
@@ -353,7 +352,7 @@ async function ensureBackendAvailable(timeoutMs = 30_000): Promise<boolean> {
     const status = await meetingASRApi.getStatus()
     if (status.isRunning) return true
     await meetingASRApi.start({
-      dashscopeApiKey: meetingStore.asrConfig.dashscopeApiKey || realtimeModelStore.config.apiKey || undefined,
+      dashscopeApiKey: getLegacyMeetingDashScopeKey() || realtimeModelStore.config.apiKey || undefined,
     })
   } catch {
     // fall through to polling — status/start failures are surfaced below

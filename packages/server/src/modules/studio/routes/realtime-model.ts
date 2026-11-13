@@ -1,5 +1,6 @@
 import Router from '@koa/router'
 import * as ctrl from '../controllers/realtime-model'
+import * as meetingTranscriptionCtrl from '../controllers/meeting-transcription'
 
 /**
  * Realtime (Qwen / DashScope) model settings routes.
@@ -14,3 +15,6 @@ export const realtimeModelRoutes = new Router()
 realtimeModelRoutes.get('/api/studio/realtime-model/settings', ctrl.getSettings)
 realtimeModelRoutes.put('/api/studio/realtime-model/settings', ctrl.saveSettings)
 realtimeModelRoutes.delete('/api/studio/realtime-model/settings', ctrl.removeSettings)
+
+realtimeModelRoutes.get('/api/studio/models/meeting-transcription', meetingTranscriptionCtrl.getMeetingTranscriptionSetting)
+realtimeModelRoutes.put('/api/studio/models/meeting-transcription', meetingTranscriptionCtrl.saveMeetingTranscriptionSetting)

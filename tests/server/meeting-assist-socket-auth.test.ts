@@ -7,8 +7,8 @@ vi.mock('../../packages/server/src/modules/studio/public/auth', () => ({
   authenticateUserToken: async (token: string) => token === 'first' ? { id: 1 } : token === 'second' ? { id: 2 } : null,
 }))
 vi.mock('../../packages/server/src/modules/studio/services/meeting-asr/direct-llm', () => ({
-  analyzeViaDirectLLM: async () => ({ summary: 'Private analysis' }),
-  streamDirectLLMReport: async function* () {},
+  analyzeMeetingBatch: async () => ({ summary: 'Private analysis' }),
+  streamMeetingModelReport: async function* () {},
 }))
 vi.mock('../../packages/server/src/modules/studio/public/logging', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }))
 import { realtimeAssistService as assist } from '../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist'
@@ -47,8 +47,8 @@ it('isolates both subscriptions and in-memory sessions when two users share a se
   })))
   expect(await first.emitWithAck('join', 'same-id')).toBe(true)
   expect(await second.emitWithAck('join', 'same-id')).toBe(true)
-  await assist.startSession('same-id', 'general', 'default', undefined, 1)
-  await assist.startSession('same-id', 'general', 'default', undefined, 2)
+  await assist.startSession('same-id', 'general', { profile: 'default' }, undefined, 1)
+  await assist.startSession('same-id', 'general', { profile: 'default' }, undefined, 2)
   const seenBySecond = vi.fn()
   second.on('analyzing', seenBySecond)
   const firstStarted = new Promise<boolean>(resolve => first.once('analyzing', resolve))

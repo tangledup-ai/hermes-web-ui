@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,6 +88,7 @@ class Settings:
         "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
     )
     paraformer_model: str = os.environ.get("PARAFORMER_MODEL", "paraformer-realtime-v2")
+    paraformer_language_hints: str = os.environ.get("PARAFORMER_LANGUAGE_HINTS", "zh,en")
     # Omni-Realtime (multimodal conversation model). The frontend + SDK target
     # `qwen3.8-omni-flash-realtime` (DashScope realtime endpoint), wired via
     # `dashscope.audio.qwen_omni.OmniRealtimeConversation`. The proxy no longer
@@ -237,4 +239,19 @@ class Settings:
         return bool(self.oss_bucket and self.oss_access_key_id and self.oss_access_key_secret)
 
 
-settings = Settings()
+default_settings = Settings()
+transcription_settings: ContextVar[Settings | None] = ContextVar("transcription_settings", default=None)
+transcription_owner: ContextVar[str | None] = ContextVar("transcription_owner", default=None)
+
+
+class RequestSettings:
+    """Read the per-request snapshot inside audio handlers and their tasks."""
+
+    def __getattr__(self, name: str):
+        return getattr(transcription_settings.get() or default_settings, name)
+
+    def __setattr__(self, name: str, value):
+        setattr(default_settings, name, value)
+
+
+settings = RequestSettings()

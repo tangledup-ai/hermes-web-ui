@@ -1,3 +1,4 @@
+import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import type { MeetingSession, SpeechEvalState } from '@/stores/hermes/meeting'
 import { useReportStream } from '@/composables/useReportStream'
 import type { GoldenQuote, GrammarIssue } from '@/composables/useMeetingAssist'
@@ -45,7 +46,7 @@ export function useSpeechEvalReport(deps: UseSpeechEvalReportDeps) {
   const stream = useReportStream({
     getSessionId: deps.getSessionId,
     getSceneTemplate: () => 'speech',
-    resolveProfile: () => deps.getSession()?.hermesProfile || undefined,
+    resolveAgent: () => resolveMeetingAgent(deps.getSession()),
     onReportGenerated: deps.onReportGenerated,
   })
 

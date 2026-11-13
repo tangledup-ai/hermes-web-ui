@@ -8,6 +8,7 @@ import { useI18n } from 'vue-i18n'
 import AuxiliaryModelsPanel from '@/components/hermes/models/AuxiliaryModelsPanel.vue'
 import CombinationModelsPanel from '@/components/hermes/models/CombinationModelsPanel.vue'
 import JevSettingsPanel from '@/components/hermes/models/JevSettingsPanel.vue'
+import MeetingTranscriptionPanel from '@/components/hermes/models/MeetingTranscriptionPanel.vue'
 import ModelApiPanel from '@/components/hermes/models/ModelApiPanel.vue'
 import ProvidersPanel from '@/components/hermes/models/ProvidersPanel.vue'
 import ProviderFormModal from '@/components/hermes/models/ProviderFormModal.vue'
@@ -277,6 +278,7 @@ async function handleRefreshModelCache() {
           <JevSettingsPanel />
         </NTabPane>
         <NTabPane name="stt" :tab="t('settings.voice.sttProvidersTitle')">
+          <MeetingTranscriptionPanel :key="selectedProfile" :profile="selectedProfile" />
           <VoiceSettings :key="`stt-${selectedProfile}`" kind="stt" />
         </NTabPane>
         <NTabPane name="tts" :tab="t('settings.voice.ttsProvidersTitle')">

@@ -1,24 +1,7 @@
 <script setup lang="ts">
-// 「拆分人声」对话框：选择识别模型（MiniMax / Qwen）与说话人数后，把整段录音
-// 重新送 ASR 做说话人分离。
-//
-// 为什么需要这个对话框而不是直接点按就执行：
-//  - 两个引擎的说话人分离能力不同：MiniMax 直接返回说话人；Qwen 只有在
-//    DashScope 异步文件转写接口上才支持 diarization，而该接口只接受公网可访问
-//    的音频 URL，因此必须先有 OSS（bucket / AK / SK）。
-//  - 所以 Qwen 选项内联 OSS 配置，并在缺失时禁用「开始拆分」，避免把后端
-//    `qwen_diarization_requires_oss` 这类错误直接甩给用户。
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NAlert, NButton, NInput, NModal, NRadio, NRadioGroup, NSelect } from 'naive-ui'
-
-export interface DiarizeOssConfig {
-  bucket: string
-  accessKeyId: string
-  accessKeySecret: string
-  endpoint: string
-  pathPrefix: string
-}
+import { NAlert, NButton, NModal, NRadio, NRadioGroup, NSelect } from 'naive-ui'
 
 export type DiarizeEngine = 'minimax' | 'qwen'
 
@@ -32,43 +15,33 @@ const props = withDefaults(defineProps<{
   minimaxKeyAvailable?: boolean
   /** 是否已配置 DashScope API Key（缺失时禁用该引擎）。 */
   dashscopeKeyAvailable?: boolean
-  /** 已保存的 OSS 配置（打开时预填）。 */
-  oss?: Partial<DiarizeOssConfig>
+  ossConfigured?: boolean
   busy?: boolean
 }>(), {
   defaultEngine: 'minimax',
   defaultSpeakerCount: 0,
   minimaxKeyAvailable: false,
   dashscopeKeyAvailable: false,
-  oss: () => ({}),
+  ossConfigured: false,
   busy: false,
 })
 
 const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void
-  (e: 'start', payload: { engine: DiarizeEngine; speakerCount: number; oss: DiarizeOssConfig }): void
+  (e: 'start', payload: { engine: DiarizeEngine; speakerCount: number }): void
+  (e: 'open-settings'): void
 }>()
 
 const { t } = useI18n()
 
 const engine = ref<DiarizeEngine>('minimax')
 const speakerCount = ref(0)
-const ossBucket = ref('')
-const ossAccessKeyId = ref('')
-const ossAccessKeySecret = ref('')
-const ossEndpoint = ref('oss-cn-beijing.aliyuncs.com')
-const ossPathPrefix = ref('meeting-asr-uploads/')
 
 /** 每次打开都从外部状态重新播种，避免上次填了一半的值残留。 */
 watch(() => props.visible, (visible) => {
   if (!visible) return
   engine.value = props.defaultEngine
   speakerCount.value = props.defaultSpeakerCount
-  ossBucket.value = props.oss?.bucket || ''
-  ossAccessKeyId.value = props.oss?.accessKeyId || ''
-  ossAccessKeySecret.value = props.oss?.accessKeySecret || ''
-  ossEndpoint.value = props.oss?.endpoint || 'oss-cn-beijing.aliyuncs.com'
-  ossPathPrefix.value = props.oss?.pathPrefix || 'meeting-asr-uploads/'
 }, { immediate: true })
 
 const speakerCountOptions = computed(() => [
@@ -80,21 +53,9 @@ const engineKeyAvailable = computed(() =>
   engine.value === 'minimax' ? props.minimaxKeyAvailable : props.dashscopeKeyAvailable,
 )
 
-/** Qwen 的整段分离需要 OSS 提供公网 URL；三项必填。 */
-const ossComplete = computed(() =>
-  !!ossBucket.value.trim() && !!ossAccessKeyId.value.trim() && !!ossAccessKeySecret.value.trim(),
+const canStart = computed(() => !props.busy && engineKeyAvailable.value
+  && (engine.value === 'minimax' || props.ossConfigured),
 )
-
-const canStart = computed(() => {
-  if (props.busy) return false
-  if (!engineKeyAvailable.value) return false
-  if (engine.value === 'qwen' && !ossComplete.value) return false
-  return true
-})
-
-function onEngineChange(value: DiarizeEngine) {
-  engine.value = value
-}
 
 function close() {
   emit('update:visible', false)
@@ -105,13 +66,6 @@ function start() {
   emit('start', {
     engine: engine.value,
     speakerCount: speakerCount.value || 0,
-    oss: {
-      bucket: ossBucket.value.trim(),
-      accessKeyId: ossAccessKeyId.value.trim(),
-      accessKeySecret: ossAccessKeySecret.value.trim(),
-      endpoint: ossEndpoint.value.trim() || 'oss-cn-beijing.aliyuncs.com',
-      pathPrefix: ossPathPrefix.value.trim() || 'meeting-asr-uploads/',
-    },
   })
 }
 </script>
@@ -129,7 +83,7 @@ function start() {
     <div class="diarize-form">
       <div class="form-item">
         <label class="form-label">{{ t('meeting.diarizeEngine') }}</label>
-        <NRadioGroup :value="engine" @update:value="onEngineChange">
+        <NRadioGroup v-model:value="engine">
           <NRadio value="minimax">
             <div class="radio-content">
               <span class="radio-title">{{ t('meeting.asrProviderMinimax') }}</span>
@@ -160,29 +114,12 @@ function start() {
         {{ engine === 'minimax' ? t('meeting.diarizeNoMinimaxKey') : t('meeting.diarizeNoDashscopeKey') }}
       </NAlert>
 
-      <!-- Qwen 异步文件转写只接受公网音频 URL → 需要 OSS 中转 -->
-      <details v-if="engine === 'qwen'" class="oss-config-details" open>
-        <summary class="oss-config-summary">{{ t('meeting.ossConfig') }}</summary>
-        <div class="oss-config-body">
-          <NAlert type="info" :show-icon="false" style="margin-bottom: 12px">
-            {{ t('meeting.diarizeQwenNeedsOss') }}
-          </NAlert>
-          <label class="form-label">{{ t('meeting.ossBucket') }}</label>
-          <NInput v-model:value="ossBucket" :placeholder="t('meeting.ossBucketPlaceholder')" />
-          <label class="form-label" style="margin-top: 12px">{{ t('meeting.ossAccessKeyId') }}</label>
-          <NInput v-model:value="ossAccessKeyId" type="password" show-password-on="click" :placeholder="t('meeting.ossAccessKeyIdPlaceholder')" />
-          <label class="form-label" style="margin-top: 12px">{{ t('meeting.ossAccessKeySecret') }}</label>
-          <NInput v-model:value="ossAccessKeySecret" type="password" show-password-on="click" :placeholder="t('meeting.ossAccessKeySecretPlaceholder')" />
-          <label class="form-label" style="margin-top: 12px">{{ t('meeting.ossEndpoint') }}</label>
-          <NInput v-model:value="ossEndpoint" :placeholder="t('meeting.ossEndpointPlaceholder')" />
-          <label class="form-label" style="margin-top: 12px">{{ t('meeting.ossPathPrefix') }}</label>
-          <NInput v-model:value="ossPathPrefix" :placeholder="t('meeting.ossPathPrefixPlaceholder')" />
-        </div>
-      </details>
-
-      <div v-if="engine === 'qwen' && !ossComplete" class="form-hint">
+      <NAlert v-if="engine === 'qwen' && !props.ossConfigured" type="warning">
         {{ t('meeting.diarizeQwenOssRequired') }}
-      </div>
+      </NAlert>
+      <NButton v-if="!canStart && !props.busy" text type="primary" @click="emit('open-settings')">
+        {{ t('models.meetingTranscription.openSettings') }}
+      </NButton>
     </div>
 
     <template #action>
@@ -241,31 +178,4 @@ function start() {
   color: $text-secondary;
 }
 
-.oss-config-details {
-  border: 1px solid rgba(var(--accent-primary-rgb), 0.15);
-  border-radius: $radius-sm;
-  overflow: hidden;
-}
-
-.oss-config-summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  font-size: 13px;
-  font-weight: 500;
-  color: $text-primary;
-  cursor: pointer;
-  user-select: none;
-  background: rgba(var(--accent-primary-rgb), 0.03);
-
-  &::-webkit-details-marker {
-    display: none;
-  }
-}
-
-.oss-config-body {
-  padding: 10px;
-  border-top: 1px solid rgba(var(--accent-primary-rgb), 0.1);
-}
 </style>

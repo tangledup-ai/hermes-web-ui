@@ -12,6 +12,7 @@ import os from 'os'
 import { logger } from '../../public/logging'
 import * as venvManager from './venv-manager'
 import * as dashscopeKeyStore from './dashscope-key-store'
+import { transcriptionContextToken } from './transcription-settings'
 
 export interface MeetingASRConfig {
   /**
@@ -104,6 +105,7 @@ export class MeetingASRService extends EventEmitter {
   private mainProcess: ChildProcess | null = null
   private diarizeProcess: ChildProcess | null = null
   private _isRunning = false
+  private _starting?: Promise<void>
   private _startTime: number | null = null
   private _config: MeetingASRConfig = {}
   private _error: string | null = null
@@ -301,65 +303,6 @@ export class MeetingASRService extends EventEmitter {
     return dashscopeKeyStore.readStoredDashScopeKey(dataDir)
   }
 
-  /**
-   * 把持久化里解析到的 DashScope key 热推给「已在运行但没拿到 key」的后端进程。
-   *
-   * 场景（2026-10-11 设备 192.168.1.54）：用户先打开录音/会议页 → 后端以空 key 启动
-   * → 之后才在「设置 → 模型 → Realtime 模型」填 key。浏览器随后会把 key 显式下发，
-   * 但设备端 Qt 客户端只开 `/ws/omni-realtime`、不会下发，于是实时对话持续报
-   * "DASHSCOPE_API_KEY is not configured"。这里在实时 WS 接入前补推一次，
-   * 用户无需重启服务/应用。
-   *
-   * 只在后端当前 key 为空时推送 —— 已有 key（会议向导或浏览器下发的）不动。
-   * 返回 true 表示确实推送了一次。
-   */
-  async ensureDashScopeKeyPushed(profile = 'default'): Promise<boolean> {
-    if (!this._isRunning || !this._asrPort) return false
-
-    let stored: string | null = null
-    try {
-      stored = await dashscopeKeyStore.resolveDashScopeKey(this.getDataDir(), profile)
-    } catch {
-      return false
-    }
-    if (!stored) return false
-
-    let asr: Record<string, unknown> | null = null
-    try {
-      const res = await this.backendRequest(this._asrPort, '/api/config', 'GET', undefined, 5000)
-      const parsed = JSON.parse(res.body)
-      asr = (parsed && typeof parsed.asr === 'object' && parsed.asr) || null
-    } catch (err) {
-      logger.warn(
-        '[meeting-asr] could not read backend config before key push: %s',
-        err instanceof Error ? err.message : err,
-      )
-      return false
-    }
-    if (String(asr?.dashscope_api_key || '').trim()) return false
-
-    const payload: Record<string, unknown> = { ...(asr || {}) }
-    // get_config_safe() 会额外附带 *_masked 展示字段，不属于 ASRConfig。
-    for (const key of Object.keys(payload)) {
-      if (key.endsWith('_masked')) delete payload[key]
-    }
-    payload.dashscope_api_key = stored
-
-    try {
-      const res = await this.backendRequest(
-        this._asrPort, '/api/config/asr', 'POST', JSON.stringify(payload), 8000,
-      )
-      if (res.status >= 200 && res.status < 300) {
-        logger.info('[meeting-asr] pushed stored DashScope key (%d chars) to running backend', stored.length)
-        return true
-      }
-      logger.warn('[meeting-asr] DashScope key push rejected: %d %s', res.status, res.body.slice(0, 200))
-    } catch (err) {
-      logger.warn('[meeting-asr] DashScope key push failed: %s', err instanceof Error ? err.message : err)
-    }
-    return false
-  }
-
   private async ensureVirtualEnv(): Promise<string> {
     const backendPath = this.getPythonBackendPath()
     const dataDir = this.getDataDir()
@@ -377,6 +320,16 @@ export class MeetingASRService extends EventEmitter {
   }
 
   async start(config: MeetingASRConfig = {}): Promise<void> {
+    if (this._starting) return this._starting
+    this._starting = this.startBackend(config)
+    try {
+      await this._starting
+    } finally {
+      this._starting = undefined
+    }
+  }
+
+  private async startBackend(config: MeetingASRConfig): Promise<void> {
     if (this._isRunning) {
       // Service is already up. Decide between restart and hot-config push:
       //   - OSS_* fields require a restart because Python config.py reads
@@ -402,6 +355,7 @@ export class MeetingASRService extends EventEmitter {
         await this.stop()
         // Fall through to the normal start path below.
       } else {
+        if (!Object.keys(config).length) return
         try {
           await this.updateConfig(config)
           logger.info('[meeting-asr] Hot-pushed non-OSS config to running service')
@@ -471,7 +425,8 @@ export class MeetingASRService extends EventEmitter {
       const env: Record<string, string> = {
         ...process.env,
         DATA_DIR: dataDir,
-        BACKEND_HOST: config.host || '0.0.0.0',
+        BACKEND_HOST: '127.0.0.1',
+        STUDIO_TRANSCRIPTION_TOKEN: transcriptionContextToken,
         BACKEND_PORT: String(this._asrPort),
         DIARIZE_PORT: String(this._diarizePort),
         CORS_ORIGIN: `http://localhost:${process.env.PORT || 6060}`,
@@ -566,7 +521,7 @@ export class MeetingASRService extends EventEmitter {
       this.emit('phase', this._startupPhase)
       logger.info('[meeting-asr] Starting main ASR service on port %d...', this._asrPort)
       const mainUvicornArgs = [
-        '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(this._asrPort),
+        '-m', 'uvicorn', 'app.main:app', '--host', env.BACKEND_HOST, '--port', String(this._asrPort),
         ...this._uvicornTlsArgs(),
       ]
       this._mainLogTail = []
@@ -614,7 +569,7 @@ export class MeetingASRService extends EventEmitter {
       // Start diarize process
       logger.info('[meeting-asr] Starting diarize service on port %d...', this._diarizePort)
       const diarizeUvicornArgs = [
-        '-m', 'uvicorn', 'app.diarize_server:app', '--host', '0.0.0.0', '--port', String(this._diarizePort),
+        '-m', 'uvicorn', 'app.diarize_server:app', '--host', env.BACKEND_HOST, '--port', String(this._diarizePort),
         ...this._uvicornTlsArgs(),
       ]
       this.diarizeProcess = spawn(pythonPath, diarizeUvicornArgs, {

@@ -1,7 +1,8 @@
 import { test, expect, type Page } from '@playwright/test'
 import { resolve } from 'node:path'
 
-async function open(page: Page, path = '/hermes/client-plugins', surface = '') {
+async function open(page: Page, path = '/hermes/client-plugins', surface = '', meetingConfigured = true) {
+  let hasTranscriptionConfig = meetingConfigured
   await page.addInitScript(() => {
     ;(window as any).__APP_VERSION__ = 'test'
     if (!localStorage.getItem('hermes_api_key')) localStorage.setItem('hermes_api_key', `test.${btoa(JSON.stringify({ sub: '1', role: 'super_admin' }))}.fixture`)
@@ -9,11 +10,18 @@ async function open(page: Page, path = '/hermes/client-plugins', surface = '') {
     localStorage.setItem('hermes_active_profile_name', 'default')
   })
   await page.route(/socket__io-client.*\.js/, route => route.fulfill({ contentType: 'text/javascript', body: `export function io(){ const s={connected:true,on(){return s},off(){return s},disconnect(){},emit(name,payload,ack){if(typeof ack==='function')ack({ok:true,data:{devices:[],events:[],runtime:{enabled:true,state:'running',updatedAt:'2026-11-13'}}})}};return s }` }))
-  await page.route(url => url.pathname.startsWith('/api/'), route => {
+  await page.route(url => url.pathname.startsWith('/api/'), async route => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/hermes/profiles') return route.fulfill({ json: { profiles: [{ name: 'default', alias: 'Default', active: true, model: 'test' }] } })
     if (path === '/api/hermes/providers') return route.fulfill({ json: { providers: [] } })
     if (path === '/api/studio/meeting-storage') return route.fulfill({ json: { meetings: [] } })
+    if (path === '/api/studio/models/meeting-transcription') {
+      if (route.request().method() === 'PUT') hasTranscriptionConfig = true
+      return route.fulfill({ json: { setting: {
+        saved: hasTranscriptionConfig, asrProvider: 'dashscope', paraformerModel: 'paraformer-realtime-v2',
+        dashscopeKeyConfigured: hasTranscriptionConfig, minimaxKeyConfigured: false, ossConfigured: false,
+      } } })
+    }
     if (path === '/api/studio/meeting-asr/status') return route.fulfill({ json: { isRunning: false, asrPort: null, diarizePort: null, error: null } })
     if (path === '/api/studio/meeting-asr/start') return route.fulfill({ json: { status: 'started', asrPort: 8000 } })
     if (path === '/api/studio/meeting-asr/healthz') return route.fulfill({ json: { status: 'ok' } })
@@ -69,8 +77,11 @@ test('meeting, USB and LAN/Xiaozhi screens remain reachable on the migrated clie
 test('meeting recording loads the static worklet and sends authenticated 16 kHz PCM', async ({ page }) => {
   const binaryFrames: Buffer[] = []
   let authenticated = false
+  let profile: string | null = null
   await page.routeWebSocket(url => url.pathname === '/ws/asr', ws => {
-    authenticated = !!new URL(ws.url()).searchParams.get('token')
+    const query = new URL(ws.url()).searchParams
+    authenticated = !!query.get('token')
+    profile = query.get('profile')
     ws.onMessage(data => { if (Buffer.isBuffer(data)) binaryFrames.push(data) })
   })
   await page.addInitScript(() => {
@@ -105,17 +116,67 @@ test('meeting recording loads the static worklet and sends authenticated 16 kHz 
     } })
   })
 
-  await open(page, '/hermes/meeting')
+  await open(page, '/hermes/meeting', '', false)
   await page.getByRole('button', { name: 'New Meeting', exact: true }).click()
+  await expect(page.getByRole('dialog')).toContainText('Ekko Agent')
+  await expect(page.getByRole('dialog').locator('input[type=password]')).toHaveCount(0)
   await page.getByRole('button', { name: 'Create', exact: true }).click()
+  const startup = page.waitForRequest(request => new URL(request.url()).pathname === '/api/studio/meeting-asr/start')
   const worklet = page.waitForResponse(response => new URL(response.url()).pathname === '/audio/pcm-worklet.js')
   await page.getByRole('button', { name: 'Start Recording', exact: true }).click()
+  expect((await startup).postDataJSON()).toEqual({})
   expect((await worklet).ok()).toBe(true)
   await expect(page.getByRole('button', { name: 'Stop Recording', exact: true })).toBeVisible()
   await page.evaluate(() => (window as Window & { emitTestAudio?: () => void }).emitTestAudio?.())
   await expect.poll(() => binaryFrames.map(frame => frame.length)).toEqual([320])
   expect(binaryFrames[0].readInt16LE(0)).toBe(16383)
   expect(authenticated).toBe(true)
+  expect(profile).toBe('default')
+})
+
+test('uploaded audio is transcribed and sent to Ekko for a persisted report', async ({ page }) => {
+  await open(page, '/hermes/meeting')
+  const saved: Array<{ agentConfig?: object; htmlContent?: string }> = []
+  await page.route('**/api/studio/meeting-storage/meeting-*', route => {
+    if (route.request().method() === 'PUT') saved.push(route.request().postDataJSON())
+    return route.fulfill({ json: { status: 'ok' } })
+  })
+  await page.route('**/api/studio/meeting-asr/transcribe/file?**', route => {
+    const query = new URL(route.request().url()).searchParams
+    expect(query.get('engine')).toBe('qwen')
+    expect(route.request().headers()['x-hermes-profile']).toBe('default')
+    expect(query.get('sessionId')).toMatch(/^meeting-/)
+    return route.fulfill({ json: { job_id: 'file-job', status: 'running' } })
+  })
+  await page.route('**/api/studio/meeting-asr/transcribe/status/file-job', route => route.fulfill({
+    json: {
+      status: 'done', progress: 1,
+      result: { duration_sec: 3, sentences: [{ text: 'Review the launch checklist.', begin_ms: 0, end_ms: 3000 }] },
+    },
+  }))
+  await page.route('**/api/studio/meeting-asr/report/stream', route => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      agentType: 'ekko', profile: 'default', transcript: 'Review the launch checklist.',
+    })
+    return route.fulfill({
+      contentType: 'text/event-stream',
+      body: `data: ${JSON.stringify({ text: '# Launch review\n\nChecklist accepted.' })}\n\ndata: [DONE]\n\n`,
+    })
+  })
+
+  await page.getByRole('button', { name: 'New Meeting', exact: true }).click()
+  await page.getByRole('dialog').getByText('Direct audio transcription', { exact: true }).click()
+  await page.getByRole('dialog').locator('input[type=file]').setInputFiles({
+    name: 'meeting.wav', mimeType: 'audio/wav', buffer: Buffer.from('test audio'),
+  })
+  await page.getByRole('button', { name: 'Create', exact: true }).click()
+  await expect(page.getByText('Review the launch checklist.', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Generate Report', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Launch review' })).toBeVisible()
+  await expect.poll(() => saved.at(-1)).toMatchObject({
+    agentConfig: { agentType: 'ekko', profile: 'default' },
+    htmlContent: '# Launch review\n\nChecklist accepted.',
+  })
 })
 
 test('enabled scanner, grading and knowledge pages load with upstream locale messages', async ({ page }) => {

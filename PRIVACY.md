@@ -42,7 +42,7 @@ recipient) include:
 | Nous Research | `https://inference-api.nousresearch.com/v1` | Nous Research; verify region with provider |
 | ChatGPT OAuth | `https://chatgpt.com/backend-api/codex` | OpenAI/ChatGPT; account terms apply |
 | Qwen OAuth | `https://portal.qwen.ai/v1` | Qwen; account terms apply |
-| Custom, imported or agent-managed provider, including apikey.fan presets | Exact URL displayed in the active provider/agent configuration | The configured operator and possibly downstream providers; region is not verified by Studio |
+| Custom, imported or agent-managed provider | Exact URL displayed in the active provider/agent configuration | The configured operator and possibly downstream providers; region is not verified by Studio |
 
 This table is not an exhaustive network allowlist. Third-party agents, MCP
 servers, browser tools, plugins, speech services and integrations can contact

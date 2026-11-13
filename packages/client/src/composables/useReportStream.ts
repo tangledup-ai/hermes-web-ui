@@ -1,13 +1,13 @@
-import { ref } from 'vue'
+import { onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getApiKey, getBaseUrl, getActiveProfileName } from '@/api/client'
+import type { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import { classifyReportError } from '@/components/hermes/meeting/report-error'
 
 export interface UseReportStreamDeps {
   getSessionId: () => string
   getSceneTemplate: () => string
-  /** 解析本会议使用的 Hermes profile（服务端据此加载分析技能） */
-  resolveProfile: () => string | undefined
+  resolveAgent: () => ReturnType<typeof resolveMeetingAgent>
   /** 报告流成功结束后回调（组件用它 emit report-generated） */
   onReportGenerated?: (markdown: string) => void
 }
@@ -28,13 +28,16 @@ export function useReportStream(deps: UseReportStreamDeps) {
   const reportError = ref<string | null>(null)
   // 最近一次尝试生成报告的 transcript，让 retry 按钮可以直接复用而不用父组件再发一次。
   const lastTranscript = ref<string>('')
+  let controller: AbortController | undefined
+
+  onUnmounted(() => controller?.abort())
 
   async function generateReport(transcript: string) {
-    console.log('[report] generateReport called:', { transcriptLen: transcript?.length ?? 0, isGenerating: isGeneratingReport.value })
-    if (!transcript || isGeneratingReport.value) {
-      console.warn('[report] generateReport early return')
-      return
-    }
+    if (!transcript || isGeneratingReport.value) return
+    controller = new AbortController()
+    const { signal } = controller
+    const agent = deps.resolveAgent()
+    const profile = agent.profile || getActiveProfileName()
 
     // 记住最近一次的 transcript，让 retry 按钮可以直接复用而不需要父组件再发一次。
     lastTranscript.value = transcript
@@ -45,19 +48,19 @@ export function useReportStream(deps: UseReportStreamDeps) {
     try {
       const response = await fetch(`${getBaseUrl()}/api/studio/meeting-asr/report/stream`, {
         method: 'POST',
+        signal,
         headers: {
           'Content-Type': 'application/json',
-          ...(getActiveProfileName() ? { 'X-Hermes-Profile': getActiveProfileName()! } : {}),
+          ...(profile ? { 'X-Hermes-Profile': profile } : {}),
           ...(getApiKey() ? { Authorization: `Bearer ${getApiKey()}` } : {}),
         },
         body: JSON.stringify({
           sessionId: deps.getSessionId(),
           sceneTemplate: deps.getSceneTemplate(),
           transcript,
-          profile: deps.resolveProfile(),
+          ...agent,
         }),
       })
-      console.log('[report] fetch status:', response.status)
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
@@ -67,16 +70,13 @@ export function useReportStream(deps: UseReportStreamDeps) {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let rawChunkCount = 0
       let sawDoneFrame = false
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const rawText = decoder.decode(value, { stream: true })
-        if (++rawChunkCount <= 3) console.log('[report] 原始SSE块 ' + rawChunkCount + ':', JSON.stringify(rawText.slice(0, 150)))
-        buffer += rawText
+        buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
 
@@ -117,18 +117,19 @@ export function useReportStream(deps: UseReportStreamDeps) {
             throw e
           }
         }
-        if (stopReading) break
+        if (stopReading) {
+          await reader.cancel()
+          break
+        }
       }
 
-      if (!sawDoneFrame) {
-        // 流在没有 [DONE] 的情况下被服务端关掉（超时 / 网络断）—— 之前会静默给出残缺报告
-        // 现在升级为错误，让 UI 红色提示用户重试，而不是显示一份看似完整其实缺尾巴的报告。
-        console.warn('[report] 流结束但未收到 [DONE] 帧；报告长度:', reportMarkdown.value.length)
+      if (!sawDoneFrame || !reportMarkdown.value.trim()) {
+        throw new Error('Report stream ended unexpectedly')
       }
 
-      console.log('[report] 流结束，共收到原始块:', rawChunkCount, '，报告长度:', reportMarkdown.value.length)
-      deps.onReportGenerated?.(reportMarkdown.value)
+      if (!signal.aborted) deps.onReportGenerated?.(reportMarkdown.value)
     } catch (err) {
+      if (signal.aborted) return
       // 之前直接展示 raw provider error 字符串（"Provider returned an empty stream with
       // no finish_reason" 等），既不可读也没给用户任何可操作路径。这里用 classifyReportError
       // 归一化到 i18n key，组件只负责 t(...)；匹配规则在 report-error.ts 里可单测。
@@ -137,6 +138,7 @@ export function useReportStream(deps: UseReportStreamDeps) {
       // raw 错误仍然打 console 方便排查，但不展示给用户。
       console.error('[report] generation failed:', rawMessage)
     } finally {
+      controller = undefined
       isGeneratingReport.value = false
     }
   }

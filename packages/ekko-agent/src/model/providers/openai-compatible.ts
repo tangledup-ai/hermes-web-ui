@@ -6,7 +6,7 @@ import {
   isPlainRecord,
   parseJson,
   parseResponseJson,
-  parseServerSentEventLine,
+  readServerSentEvents,
   providerHttpError,
   providerUrl,
   modelRequestHeaders,
@@ -169,100 +169,88 @@ export class OpenAICompatibleModelClient implements ModelClient {
       })
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
     const toolCalls = new Map<number, { id: string; name: string; argumentsText: string }>()
     let hasCompletedToolCalls = false
-    let buffer = ''
     let finishReason: string | undefined
     let responseId: string | undefined
     let responseModel: string | undefined
     const reasoningDetails = new Map<string, Record<string, unknown>>()
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split(/\r?\n/)
-        buffer = lines.pop() ?? ''
-
-        for (const line of lines) {
-          const event = parseServerSentEventLine(line)
-          if (!event) continue
-          if (event === '[DONE]') {
-            yield {
-              type: 'done',
-              response: {
-                id: responseId,
-                model: responseModel,
-                finishReason,
-                reasoning: normalizeAgentReasoning(
-                  undefined,
-                  openAIReasoningDetails([...reasoningDetails.values()]),
-                ),
-              },
-            }
-            return
-          }
-
-          const chunk = parseJson<OpenAIChatResponse>(event)
-          if (!chunk) continue
-          responseId = chunk.id ?? responseId
-          responseModel = chunk.model ?? responseModel
-
-          if (chunk.usage) {
-            yield { type: 'usage', usage: normalizeUsage(chunk.usage) }
-          }
-
-          const choice = chunk.choices?.[0]
-          if (!choice) continue
-          finishReason = choice.finish_reason ?? finishReason
-
-          const content = choice.delta?.content
-          if (content) {
-            yield { type: 'text-delta', text: content }
-          }
-          const reasoning = choice.delta?.reasoning_content ?? choice.delta?.reasoning
-          if (reasoning) {
-            yield { type: 'reasoning-delta', text: reasoning }
-          } else {
-            const detailsText = reasoningDetailsText(choice.delta?.reasoning_details)
-            if (detailsText) yield { type: 'reasoning-delta', text: detailsText }
-          }
-          mergeOpenAIReasoningDetails(reasoningDetails, choice.delta?.reasoning_details)
-
-          for (const toolCallDelta of choice.delta?.tool_calls ?? []) {
-            const index = toolCallDelta.index ?? 0
-            const current = toolCalls.get(index) ?? { id: '', name: '', argumentsText: '' }
-            current.id = toolCallDelta.id || current.id
-            current.name = toolCallDelta.function?.name || current.name
-            current.argumentsText += toolCallDelta.function?.arguments ?? ''
-            toolCalls.set(index, current)
-          }
-
-          if (choice.finish_reason === 'tool_calls') {
-            // OpenRouter repeats this finish reason in a usage-only trailer.
-            // Only ignore an empty trailer after a valid tool call was emitted.
-            if (toolCalls.size === 0 && hasCompletedToolCalls) continue
-            let validToolCalls = 0
-            for (const toolCall of toolCalls.values()) {
-              const normalized = normalizeToolCall(toolCall.id, toolCall.name, toolCall.argumentsText)
-              if (!normalized) continue
-              validToolCalls += 1
-              yield { type: 'tool-call', toolCall: normalized }
-            }
-            toolCalls.clear()
-            if (validToolCalls === 0) {
-              throw invalidOpenAIToolCallError(this.provider)
-            }
-            hasCompletedToolCalls = true
-          }
+    for await (const event of readServerSentEvents(response)) {
+      if (event === '[DONE]') {
+        yield {
+          type: 'done',
+          response: {
+            id: responseId,
+            model: responseModel,
+            finishReason,
+            reasoning: normalizeAgentReasoning(
+              undefined,
+              openAIReasoningDetails([...reasoningDetails.values()]),
+            ),
+          },
         }
+        return
       }
-    } finally {
-      reader.releaseLock()
+
+      const chunk = parseJson<OpenAIChatResponse>(event)
+      if (!chunk) continue
+      if (chunk.error) {
+        throw new ModelProviderError(chunk.error.message || 'Model provider stream failed.', {
+          provider: this.provider,
+          details: chunk.error,
+        })
+      }
+      responseId = chunk.id ?? responseId
+      responseModel = chunk.model ?? responseModel
+
+      if (chunk.usage) {
+        yield { type: 'usage', usage: normalizeUsage(chunk.usage) }
+      }
+
+      const choice = chunk.choices?.[0]
+      if (!choice) continue
+      finishReason = choice.finish_reason ?? finishReason
+
+      const content = choice.delta?.content ?? normalizeContent(choice.message?.content)
+      if (content) {
+        yield { type: 'text-delta', text: content }
+      }
+      const reasoning = choice.delta?.reasoning_content ?? choice.delta?.reasoning
+      if (reasoning) {
+        yield { type: 'reasoning-delta', text: reasoning }
+      } else {
+        const detailsText = reasoningDetailsText(choice.delta?.reasoning_details)
+        if (detailsText) yield { type: 'reasoning-delta', text: detailsText }
+      }
+      mergeOpenAIReasoningDetails(reasoningDetails, choice.delta?.reasoning_details)
+
+      for (const toolCallDelta of choice.delta?.tool_calls ?? []) {
+        const index = toolCallDelta.index ?? 0
+        const current = toolCalls.get(index) ?? { id: '', name: '', argumentsText: '' }
+        current.id = toolCallDelta.id || current.id
+        current.name = toolCallDelta.function?.name || current.name
+        current.argumentsText += toolCallDelta.function?.arguments ?? ''
+        toolCalls.set(index, current)
+      }
+
+      if (choice.finish_reason === 'tool_calls') {
+        // OpenRouter repeats this finish reason in a usage-only trailer.
+        // Only ignore an empty trailer after a valid tool call was emitted.
+        if (toolCalls.size === 0 && hasCompletedToolCalls) continue
+        let validToolCalls = 0
+        for (const toolCall of toolCalls.values()) {
+          const normalized = normalizeToolCall(toolCall.id, toolCall.name, toolCall.argumentsText)
+          if (!normalized) continue
+          validToolCalls += 1
+          yield { type: 'tool-call', toolCall: normalized }
+        }
+        toolCalls.clear()
+        if (validToolCalls === 0) {
+          throw invalidOpenAIToolCallError(this.provider)
+        }
+        hasCompletedToolCalls = true
+      }
     }
 
     yield {

@@ -2,11 +2,10 @@ import { getApiKey, getBaseUrl, getActiveProfileName } from '@/api/client'
 
 const API_BASE = '/api/studio/meeting-asr'
 
-function getAuthHeaders(): Record<string, string> {
+function getAuthHeaders(profile = getActiveProfileName()): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
-  const profile = getActiveProfileName()
   if (profile) headers['X-Hermes-Profile'] = profile
   const apiKey = getApiKey()
   if (apiKey) {
@@ -105,10 +104,10 @@ export const meetingASRApi = {
     return response.json()
   },
 
-  async start(config: MeetingASRConfig = {}): Promise<{ status: string } & MeetingASRStatus> {
+  async start(config: MeetingASRConfig = {}, profile?: string): Promise<{ status: string } & MeetingASRStatus> {
     const response = await fetch(`${getBaseUrl()}${API_BASE}/start`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(profile),
       body: JSON.stringify(config),
     })
     return response.json()
@@ -230,13 +229,10 @@ export const meetingASRApi = {
     if (options.language) params.set('language', options.language)
     if (options.sessionId) params.set('sessionId', options.sessionId)
 
-    const headers: Record<string, string> = {
+    const headers = {
+      ...getAuthHeaders(options.profile),
       'Content-Type': file.type || 'application/octet-stream',
     }
-    const profile = getActiveProfileName()
-  if (profile) headers['X-Hermes-Profile'] = profile
-  const apiKey = getApiKey()
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
 
     const response = await fetch(`${getBaseUrl()}${API_BASE}/transcribe/file?${params.toString()}`, {
       method: 'POST',
@@ -254,9 +250,9 @@ export const meetingASRApi = {
     return response.json()
   },
 
-  async getFileTranscriptionStatus(jobId: string): Promise<FileTranscriptionJob> {
+  async getFileTranscriptionStatus(jobId: string, profile?: string): Promise<FileTranscriptionJob> {
     const response = await fetch(`${getBaseUrl()}${API_BASE}/transcribe/status/${encodeURIComponent(jobId)}`, {
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(profile),
     })
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
@@ -291,6 +287,7 @@ export class MeetingASRHttpError extends Error {
 
 export interface FileTranscriptionOptions {
   engine: TranscribeEngine
+  profile?: string
   /** Request speaker labels (`speaker_id` on each sentence). */
   diarize?: boolean
   /** Desired speaker count; 0 / undefined means auto-detect. */

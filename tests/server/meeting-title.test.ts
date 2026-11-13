@@ -32,7 +32,7 @@ describe('cleanMeetingTitle', () => {
 describe('generateMeetingTitle', () => {
   it('posts a chat completion and returns the cleaned title', async () => {
     const { fetchMock, ...deps } = fakeDeps('季度产品规划会')
-    const title = await generateMeetingTitle('转写内容…', deps as any)
+    const title = await generateMeetingTitle('转写内容…', { profile: 'default' }, deps)
     expect(title).toBe('季度产品规划会')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     // 校验发送了命名提示词
@@ -44,7 +44,7 @@ describe('generateMeetingTitle', () => {
 
   it('returns null gracefully when the LLM call fails', async () => {
     const deps = fakeDeps(null, false)
-    const title = await generateMeetingTitle('转写内容…', deps as any)
+    const title = await generateMeetingTitle('转写内容…', { profile: 'default' }, deps)
     expect(title).toBeNull()
   })
 
@@ -52,13 +52,13 @@ describe('generateMeetingTitle', () => {
     const deps = {
       loadConfig: async () => null,
     }
-    const title = await generateMeetingTitle('转写内容…', deps as any)
+    const title = await generateMeetingTitle('转写内容…', { profile: 'default' }, deps)
     expect(title).toBeNull()
   })
 
   it('returns null on empty transcript', async () => {
     const { fetchMock, ...deps } = fakeDeps('whatever')
-    expect(await generateMeetingTitle('   ', deps as any)).toBeNull()
+    expect(await generateMeetingTitle('   ', { profile: 'default' }, deps)).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })

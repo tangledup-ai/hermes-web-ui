@@ -57,7 +57,7 @@ Use when parts of the source should be preserved:
 ## Options
 
 - `--profile <name>`: required in Ekko runs; use the current runtime Profile.
-- `--provider <name>`: optional configured custom provider. Omit it to use the Profile's image route and server fallback.
+- `--provider <name>`: optional configured custom provider. Omit it to use the Profile's configured image routes.
 - `--size <width>x<height>`: defaults to `1024x1024`. Also accepts `auto` when supported.
 - `--quality <value>`: optional provider quality setting.
 - `--n <count>`: number of images; defaults to `1`.
@@ -70,7 +70,7 @@ Do not invent a provider or model override. Use them only when the user requeste
 
 ## Errors
 
-- `missing_fun_codex_provider`: the current Profile has no default `fun-codex` provider or configured image route.
-- `missing_apikey_image_provider`: the requested provider is absent from the current Profile.
+- `image_provider_not_configured`: configure an auxiliary image provider for this Profile in Model settings.
+- `missing_apikey_image_provider`: the selected provider needs a configured URL and API key in this Profile.
 - `profile_not_found`: the Ekko Profile does not map to an existing Studio/Hermes Profile used by the media endpoint.
 - `401`, `403`, connection failure, timeout, or any provider error: report the Studio error and stop. Do not bypass Studio or silently retry against another service.

@@ -243,7 +243,7 @@ export const SCENE_TEMPLATES: SceneTemplate[] = [
  * 报告提示词统一追加的“先拟标题”指令。
  *
  * agent-bridge（Hermes Agent 主路径）与 direct-llm（直调 fallback）两条报告路径
- * 都以此为单份配置源（见 streamAgentReport / streamDirectLLMReport），保证无论走
+ * 都以此为单份配置源（见 streamAgentReport / streamMeetingModelReport），保证无论走
  * 哪条路径生成的报告开头都有一行 `# 标题`，前端在 AI 分析/报告完成后据此提取标题
  * 并自动命名会议（替换默认的“会议 + 时间”占位标题）。
  */

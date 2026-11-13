@@ -16,9 +16,6 @@
       "unowned-background | .node-warning-bar | background-color: #fef3c7": 1,
       "literal-color | .node-warning-bar | border-bottom: var(--border-width, 1px) solid #fde68a": 1
     },
-    "packages/client/src/components/hermes/ApiRelayUsageCard.vue": {
-      "unowned-background | .relay-usage-sources li | background: $bg-secondary": 1
-    },
     "packages/client/src/components/hermes/HermesDataDirectoryHint.vue": {
       "unowned-background | .data-directory-env-platform code | background: var(--hover-color)": 1
     },

@@ -2,6 +2,7 @@
 // 客户访谈场景 · 专属右栏面板：洞察流 / 关键引语 / 追问建议 / 报告。
 // 注册于 scene-ui-registry（interview 场景）。极简设计令牌与全局一致：
 // 无卡片盒、发丝分隔线、无 emoji 图标。
+import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import { computed, watch, onUnmounted, defineAsyncComponent } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NButton, NSpin } from 'naive-ui'
@@ -64,7 +65,7 @@ watch(() => props.isRecording, async (recording) => {
         body: JSON.stringify({
           sessionId: props.sessionId,
           sceneTemplate: 'interview',
-          profile: session.value?.hermesProfile || undefined,
+          ...resolveMeetingAgent(session.value),
         }),
       })
     } catch { /* best effort */ }
@@ -97,7 +98,7 @@ const {
 } = useReportStream({
   getSessionId: () => props.sessionId,
   getSceneTemplate: () => 'interview',
-  resolveProfile: () => session.value?.hermesProfile || undefined,
+  resolveAgent: () => resolveMeetingAgent(session.value),
   onReportGenerated: (markdown) => emit('report-generated', markdown),
 })
 

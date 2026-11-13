@@ -28,8 +28,8 @@ export interface UseMeetingAudioDeps {
   asrServiceError: Ref<string>
   /** 没有活动会议时引导新建会议 */
   openCreateModal: () => void
-  /** 确保后端 ASR 服务运行（view 编排，含向导输入回退） */
-  startASRService: () => Promise<boolean>
+  getTranscriptionProfile: () => string
+  startASRService: (profile: string) => Promise<boolean>
   /** ASR/Diarize WS 消息处理（view 编排，写转写状态） */
   handleWsMessage: (data: any, source?: 'asr' | 'diarize') => void
   /** 录音停止后保存会议数据 */
@@ -60,6 +60,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
   // WebSocket goes through the Node server proxy (/ws/asr, /ws/diarize) so the
   // browser uses the same origin (wss://host:6060) — no Mixed Content, no
   // self-signed cert issues. The proxy forwards plaintext to the Python backend.
+  let recordingProfile: string | undefined
   const ASR_URL = '/ws/asr'
   const DIARIZE_URL = '/ws/diarize'
 
@@ -192,7 +193,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
   // 尝试重连 ASR WebSocket（音频管线保持运行，仅重建 socket）
   async function tryReconnectASR() {
-    if (cleanStop || !isRecording.value) return
+    if (cleanStop || !isRecording.value || !recordingProfile) return
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       console.warn('[meeting] ASR reconnect: max attempts reached, stopping recording')
       stopRecording()
@@ -204,12 +205,13 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     console.log(`[meeting] ASR reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms...`)
     statusText.value = t('meeting.reconnecting')
 
+    const profile = recordingProfile
     reconnectTimer = setTimeout(async () => {
       if (cleanStop || !isRecording.value) return
 
       try {
         // 先确保服务端 ASR 进程仍在运行（可能因崩溃而不可用）
-        const started = await deps.startASRService()
+        const started = await deps.startASRService(profile)
         if (!started) {
           console.warn('[meeting] ASR reconnect: startASRService failed, will retry')
           // 继续重试，不立即放弃
@@ -217,8 +219,8 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           return
         }
 
-        // 创建新的 ASR WebSocket
-        ws = new WebSocket(meetingWebSocketUrl(ASR_URL))
+        if (cleanStop || !isRecording.value || profile !== recordingProfile) return
+        ws = new WebSocket(meetingWebSocketUrl(ASR_URL, profile))
 
         ws.onopen = () => {
           console.log('[meeting] ASR WebSocket reconnected')
@@ -281,7 +283,10 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       // 检查并启动 ASR 服务（服务已运行时也会调用，确保 OSS 配置变更后重启进程）
       statusText.value = t('meeting.startingASRService')
       console.log('[meeting] Ensuring ASR service is running with current config...')
-      const started = await deps.startASRService()
+      const profile = deps.getTranscriptionProfile()
+      recordingProfile = profile
+      const started = await deps.startASRService(profile)
+      if (cleanStop) return
       if (!started) {
         const errorMsg = deps.asrServiceError.value || t('meeting.asrServiceStartError')
         console.error('[meeting] Failed to start ASR service:', errorMsg)
@@ -291,11 +296,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       }
       console.log('[meeting] ASR service ready, ports:', deps.asrServiceStatus.value.asrPort, deps.asrServiceStatus.value.diarizePort)
 
-      // 等待服务完全就绪并验证
       statusText.value = t('meeting.connecting')
-      await new Promise(resolve => setTimeout(resolve, 2000))
-
-      // 验证服务是否真的启动了
       try {
         const healthCheck = await meetingASRApi.healthCheck()
         console.log('[meeting] ASR service health check:', healthCheck)
@@ -319,6 +320,11 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           autoGainControl: { ideal: false },
         },
       })
+      if (cleanStop) {
+        mediaStream.getTracks().forEach(track => track.stop())
+        mediaStream = null
+        return
+      }
 
       // 创建音频上下文
       audioContext = new AudioContext({ sampleRate: 16000 })
@@ -337,6 +343,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       // AudioWorklet 替代 deprecated ScriptProcessorNode，跑在 audio 线程不抢主线程。
       // JS 副本在 public/audio/pcm-worklet.js（源文件 src/audio/pcm-worklet.ts）。
       await audioContext.audioWorklet.addModule('/audio/pcm-worklet.js')
+      if (cleanStop) return
       const pcmNode = new AudioWorkletNode(audioContext, 'pcm-processor')
       source.connect(analyser.value)
       analyser.value.connect(pcmNode)
@@ -362,7 +369,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       if (isSaveMode) {
         // 节省模式：只连接 Diarize WebSocket，不走实时ASR
         console.log('[meeting] Save mode: only connecting to Diarize WebSocket:', DIARIZE_URL)
-        diarizeWs = new WebSocket(meetingWebSocketUrl(DIARIZE_URL))
+        diarizeWs = new WebSocket(meetingWebSocketUrl(DIARIZE_URL, profile))
 
         diarizeWs.onopen = () => {
           console.log('Diarize WebSocket connected (save mode)')
@@ -406,19 +413,14 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
         // 连接 ASR WebSocket (实时转写)
         console.log('[meeting] Connecting to ASR WebSocket:', ASR_URL)
-        ws = new WebSocket(meetingWebSocketUrl(ASR_URL))
+        ws = new WebSocket(meetingWebSocketUrl(ASR_URL, profile))
 
         ws.onopen = () => {
           console.log('ASR WebSocket connected')
           isConnecting.value = false
           isRecording.value = true
           statusText.value = t('meeting.recording')
-          // Per-session provider override: route audio to DashScope (default)
-          // or MiniMax based on the active session's asrProvider field.
-          const startPayload: Record<string, unknown> = { type: 'start' }
-          const provider = meetingStore.activeSession?.asrProvider
-          if (provider === 'minimax') startPayload.provider = 'minimax'
-          ws?.send(JSON.stringify(startPayload))
+          ws?.send(JSON.stringify({ type: 'start' }))
         }
 
         ws.onmessage = (event) => {
@@ -445,7 +447,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
         // 同时连接 Diarize WebSocket (说话人分离)
         console.log('[meeting] Connecting to Diarize WebSocket:', DIARIZE_URL)
-        diarizeWs = new WebSocket(meetingWebSocketUrl(DIARIZE_URL))
+        diarizeWs = new WebSocket(meetingWebSocketUrl(DIARIZE_URL, profile))
 
         diarizeWs.onopen = () => {
           console.log('Diarize WebSocket connected')
@@ -480,17 +482,14 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
         const asrUrl = ASR_URL
         console.log('[meeting] Connecting to ASR WebSocket:', asrUrl)
-        ws = new WebSocket(meetingWebSocketUrl(asrUrl))
+        ws = new WebSocket(meetingWebSocketUrl(asrUrl, profile))
 
         ws.onopen = () => {
           console.log('ASR WebSocket connected')
           isConnecting.value = false
           isRecording.value = true
           statusText.value = t('meeting.recording')
-          const startPayload: Record<string, unknown> = { type: 'start' }
-          const provider = meetingStore.activeSession?.asrProvider
-          if (provider === 'minimax') startPayload.provider = 'minimax'
-          ws?.send(JSON.stringify(startPayload))
+          ws?.send(JSON.stringify({ type: 'start' }))
         }
 
         ws.onmessage = (event) => {
@@ -596,6 +595,9 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
   }
 
   async function stopRecording() {
+    if (cleanStop) return
+    const meetingId = meetingStore.activeSessionId
+    const hadRecording = isRecording.value
     cleanStop = true
     clearReconnectTimer()
     reconnectAttempts = 0
@@ -624,6 +626,8 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     if (closingAsrWs && closingAsrWs.readyState === WebSocket.OPEN) {
       closingAsrWs.send(JSON.stringify({ type: 'stop' }))
       setTimeout(() => closingAsrWs.close(), 500)
+    } else {
+      closingAsrWs?.close()
     }
     ws = null
 
@@ -631,6 +635,8 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     if (closingDiarizeWs && closingDiarizeWs.readyState === WebSocket.OPEN) {
       closingDiarizeWs.send(JSON.stringify({ type: 'stop' }))
       setTimeout(() => closingDiarizeWs.close(), 500)
+    } else {
+      closingDiarizeWs?.close()
     }
     diarizeWs = null
 
@@ -649,19 +655,17 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     // MediaRecorder 每 1000ms 切一块，这里统一合成整段 webm 落库：
     //  - 服务器：优先写，失败时 IndexedDB 仍兜底保留本机数据
     //  - IndexedDB：直接存 Blob，作为离线备份
-    if (audioChunks.value.length > 0 && meetingStore.activeSessionId) {
-      audioBlob.value = new Blob(audioChunks.value, { type: 'audio/webm' })
-      audioUrl.value = URL.createObjectURL(audioBlob.value)
-
-      const meetingId = meetingStore.activeSessionId
-      const meeting = meetingStore.activeSession
-
-      // 先落会议数据（含 transcript），再上传音频，两件事互相隔离
-      deps.saveCurrentMeeting()
+    if (hadRecording) void deps.saveCurrentMeeting()
+    if (audioChunks.value.length > 0 && meetingId) {
+      const recording = new Blob(audioChunks.value, { type: 'audio/webm' })
+      audioChunks.value = []
+      audioBlob.value = recording
+      if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
+      audioUrl.value = URL.createObjectURL(recording)
 
       // 上传音频到服务器（失败不阻断 IndexedDB 本地备份）
       await meetingStorageApi
-        .uploadAudio(meetingId, audioBlob.value)
+        .uploadAudio(meetingId, recording)
         .then(() => console.log('Audio saved to server'))
         .catch(err => {
           console.error('Failed to save audio to server:', err)
@@ -670,21 +674,16 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
       // 保存到 IndexedDB 作为本机备份（直接存 Blob，避免 base64 编码 33% 膨胀）
       try {
-        await meetingStore.saveAudioData(meetingId, audioBlob.value)
+        await meetingStore.saveAudioData(meetingId, recording)
       } catch (err) {
         console.error('Failed to save audio to IndexedDB:', err)
       }
 
-      // 完成落库后，清空内存引用让 GC 回收，避免大会议残留内存
-      audioChunks.value = []
-      if (meeting) {
-        meetingStore.updateSession(meetingId, { audioDuration: meeting.audioDuration })
-      }
     }
 
     // 录音停止后自动触发报告生成
     const session = meetingStore.activeSession
-    if (session && session.sentences.length > 0 && deps.assistPanelRef.value) {
+    if (hadRecording && session && session.id === meetingId && session.sentences.length > 0 && deps.assistPanelRef.value) {
       const transcript = session.sentences
         .map(s => `${s.speaker ? `[${s.speaker}] ` : ''}${s.text}`)
         .join('\n')

@@ -1936,6 +1936,14 @@ export const REALTIME_PROFILE_SETTINGS_SCHEMA: Record<string, string> = {
   updated_at: `INTEGER NOT NULL DEFAULT (strftime('%s','now'))`,
 }
 
+export const MEETING_TRANSCRIPTION_SETTINGS_TABLE = 'meeting_transcription_settings'
+
+const MEETING_TRANSCRIPTION_SETTINGS_SCHEMA: Record<string, string> = {
+  profile: 'TEXT PRIMARY KEY',
+  config_json: "TEXT NOT NULL DEFAULT '{}'",
+  panel_saved: 'INTEGER NOT NULL DEFAULT 0',
+}
+
 
 export function initAllHermesTables(): void {
   const db = getDb()
@@ -1947,6 +1955,7 @@ export function initAllHermesTables(): void {
       indexes: DEVICES_INDEXES,
     })
     syncTable(REALTIME_PROFILE_SETTINGS_TABLE, REALTIME_PROFILE_SETTINGS_SCHEMA)
+    syncTable(MEETING_TRANSCRIPTION_SETTINGS_TABLE, MEETING_TRANSCRIPTION_SETTINGS_SCHEMA)
     syncTable(USB_EVENTS_TABLE, USB_EVENTS_SCHEMA, { indexes: USB_EVENTS_INDEXES })
 
     syncTable(USAGE_TABLE, USAGE_SCHEMA, { primaryKey: 'id' })

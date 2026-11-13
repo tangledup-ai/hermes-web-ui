@@ -1,4 +1,5 @@
-import { getApiKey, getBaseUrl, getActiveProfileName } from '@/api/client'
+import { request } from '@/api/client'
+import type { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 
 /**
  * 会议标题自动命名辅助函数（纯函数，便于单测）。
@@ -78,23 +79,17 @@ export function formatTranscriptForTitle(sentences: Array<{ text?: string; speak
 /**
  * 向服务端请求一个 AI 生成的会议标题（轻量、一次）。失败返回 null，绝不抛错。
  */
-export async function requestAiMeetingTitle(transcript: string): Promise<string | null> {
-  if (!transcript || !transcript.trim()) return null
+export async function requestAiMeetingTitle(
+  transcript: string,
+  agent: ReturnType<typeof resolveMeetingAgent>,
+): Promise<string | null> {
+  if (!transcript.trim()) return null
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    const profile = getActiveProfileName()
-    if (profile) headers['X-Hermes-Profile'] = profile
-    const apiKey = getApiKey()
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
-    const response = await fetch(`${getBaseUrl()}/api/studio/meeting-asr/title`, {
+    const data = await request<{ title?: string }>('/api/studio/meeting-asr/title', {
       method: 'POST',
-      headers,
-      body: JSON.stringify({ transcript }),
+      body: JSON.stringify({ transcript, ...agent }),
     })
-    if (!response.ok) return null
-    const data = await response.json().catch(() => null)
-    const title = sanitizeMeetingTitle((data as any)?.title)
-    return title
+    return sanitizeMeetingTitle(data.title)
   } catch {
     return null
   }

@@ -7,7 +7,7 @@ license: MIT
 platforms: [linux, macos, windows, termux]
 metadata:
   hermes:
-    tags: [api.apikey.fan, custom-provider, image-generation, image-editing, media]
+    tags: [custom-provider, image-generation, image-editing, media]
 prerequisites:
   commands: [curl]
 ---
@@ -16,7 +16,7 @@ prerequisites:
 
 Use this skill when the user wants to generate an image or edit an existing image.
 
-Always call Ekko Studio's media endpoint. Do not call an upstream image API directly, and do not ask the user for an API key. The server reads the selected/requested profile's `config.yaml` and uses a configured custom provider. By default it uses the provider named `fun-codex`, but callers may request another configured provider by sending `provider`, `provider_name`, or `custom_provider`.
+Always call Ekko Studio's media endpoint. Do not call an upstream image API directly, and do not ask the user for an API key. The server reads the selected/requested profile's `config.yaml` and uses a configured custom provider. Select an auxiliary image provider in Model settings, or send a configured provider name as `provider`, `provider_name`, or `custom_provider`.
 
 This skill is separate from Hermes Agent's native `image_generate` tool. The
 native tool reads `image_gen` from `config.yaml`; this Studio-managed endpoint
@@ -25,16 +25,7 @@ Changing one does not change the other.
 
 Do not use any built-in image generation tool as a fallback. If the Hermes Web UI endpoint returns `401`, `403`, connection failure, or any other error, stop and report the Hermes Web UI error to the user.
 
-```yaml
-custom_providers:
-  - name: fun-codex
-    base_url: https://api.apikey.fan/v1
-    api_key: ...
-    model: gpt-5.5
-    api_mode: codex_responses
-```
-
-Example with another configured provider:
+Example configuration:
 
 ```yaml
 custom_providers:
@@ -57,7 +48,7 @@ auxiliary:
 `image_generation` supplies the route for text-to-image and multipart image
 edits. `image_edit` supplies the route and primary model for image-to-image
 through the Responses API. If the active route has no provider, the
-server falls back to the other image route and then to `fun-codex`.
+server uses the provider on the other image route.
 
 Endpoint:
 
@@ -121,7 +112,7 @@ Use when there is no input image.
 ```
 
 The server calls `POST /v1/images/generations` against the configured
-`auxiliary.image_generation` provider, then falls back to `fun-codex`.
+`auxiliary.image_generation` provider or the `auxiliary.image_edit` provider.
 If `provider`, `provider_name`, or `custom_provider` is present, the server calls the requested provider's base URL instead.
 
 ### Image To Image
@@ -139,8 +130,7 @@ Use when the user provides an existing image and wants the model to modify or re
 ```
 
 The server calls `POST /v1/responses` against the configured
-`auxiliary.image_edit` provider, then the image-generation provider, then
-`fun-codex`.
+`auxiliary.image_edit` provider or the `auxiliary.image_generation` provider.
 If `provider`, `provider_name`, or `custom_provider` is present, the server calls the requested provider's base URL instead.
 
 ### Image Edit
@@ -158,14 +148,14 @@ Use when the user wants to modify an existing image while preserving parts of it
 ```
 
 The server calls `POST /v1/images/edits` against the configured
-`auxiliary.image_generation` provider, then falls back to `fun-codex`.
+`auxiliary.image_generation` provider or the `auxiliary.image_edit` provider.
 If `provider`, `provider_name`, or `custom_provider` is present, the server calls the requested provider's base URL instead.
 
 ## Request Fields
 
 - `mode`: `text`, `image`, or `edit`.
 - `prompt`: required.
-- `provider`: optional configured custom provider name. Defaults to `fun-codex`. `custom:<name>` is accepted and normalized to `<name>`.
+- `provider`: optional configured custom provider name. Omit it to use the Profile's configured image routes. `custom:<name>` is accepted and normalized to `<name>`.
 - `provider_name`: optional alias for `provider`.
 - `custom_provider`: optional alias for `provider`.
 - `image_path`: local png, jpeg, or webp path. Required for `image` and `edit` unless using `image_url` or `image_base64`.
@@ -208,7 +198,6 @@ curl -sS -X POST "$BASE_URL/api/studio/media/apikey-image-generate" \
   -H 'Content-Type: application/json' \
   -d '{
     "mode": "text",
-    "provider": "fun-codex",
     "prompt": "A cinematic 4K photo of a silver robot hand holding a small glowing cube",
     "size": "3840x2160",
     "output_path": "/absolute/path/to/output.png"
@@ -222,10 +211,9 @@ Successful responses include:
   "ok": true,
   "mode": "text",
   "output_paths": ["/absolute/path/to/output.png"],
-  "provider": "fun-codex",
-  "base_url": "https://api.apikey.fan/v1"
+  "provider": "agnes",
+  "base_url": "https://agnes.example/v1"
 }
 ```
 
-If the response code is `missing_fun_codex_provider`, tell the user to configure `fun-codex` in the selected/requested profile's `config.yaml`.
-If the response code is `missing_apikey_image_provider`, tell the user to configure the requested provider in the selected/requested profile's `config.yaml`, or omit `provider` to use the default `fun-codex` provider.
+If the response code is `image_provider_not_configured`, tell the user to configure an auxiliary image provider for this Profile in Model settings. For `missing_apikey_image_provider`, ask them to check the selected provider's URL and credential.

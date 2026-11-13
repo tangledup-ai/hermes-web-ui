@@ -1,22 +1,10 @@
 <script setup lang="ts">
-import { NAlert, NButton, NInput, NSelect, type SelectOption } from 'naive-ui'
+import { NButton, NInput, NSelect, type SelectOption } from 'naive-ui'
 import { onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useRealtimeModelStore } from '@/stores/hermes/realtime-model'
 import { useMessage } from '@/composables/useAppMessage'
-
-/**
- * Realtime 模型面板（设置 → 模型 → Realtime 模型）。
- *
- * 这里统一管理两个共用 API：
- *   1. 千问（DashScope）API Key —— 会议模式 ASR 与 Realtime 对话
- *      在未单独填写 DashScope Key 时默认回落此处。
- *   2. MiniMax API Key —— 会议模式 ASR 选择 MiniMax provider 时使用；
- *      详见 https://platform.minimax.cn/docs/api-reference/speech-to-text 。
- *
- * 配置持久化在当前用户 Profile（服务端），与 STT/TTS 模型设置一致——打开
- * 面板时先从服务端拉取当前 Profile 的配置，保存时写回服务端。
- */
 
 const { t } = useI18n()
 const message = useMessage()
@@ -31,25 +19,9 @@ const voiceOptions: SelectOption[] = [
   { label: 'Ryan (男声 · 中文)', value: 'Ryan' },
 ]
 
-/** ASR provider options for the meeting-mode speech recognition card. */
-const asrProviderOptions: SelectOption[] = [
-  {
-    label: 'DashScope (Qwen Paraformer / Fun-ASR)',
-    value: 'dashscope',
-  },
-  {
-    label: 'MiniMax (Speech-to-Text)',
-    value: 'minimax',
-  },
-]
-
 const apiKey = ref(store.config.apiKey)
 const model = ref(store.config.model)
 const voice = ref(store.config.voice)
-const asrProvider = ref(store.config.asrProvider)
-const minimaxApiKey = ref(store.config.minimaxApiKey)
-const minimaxAsrModel = ref(store.config.minimaxAsrModel)
-const minimaxBaseUrl = ref(store.config.minimaxBaseUrl)
 const saving = ref(false)
 
 onMounted(async () => {
@@ -59,10 +31,6 @@ onMounted(async () => {
   apiKey.value = store.config.apiKey
   model.value = store.config.model
   voice.value = store.config.voice
-  asrProvider.value = store.config.asrProvider
-  minimaxApiKey.value = store.config.minimaxApiKey
-  minimaxAsrModel.value = store.config.minimaxAsrModel
-  minimaxBaseUrl.value = store.config.minimaxBaseUrl
 })
 
 async function handleSave() {
@@ -72,10 +40,6 @@ async function handleSave() {
       apiKey: apiKey.value.trim(),
       model: model.value.trim() || 'qwen3.8-omni-flash-realtime',
       voice: voice.value || 'Tina',
-      asrProvider: asrProvider.value,
-      minimaxApiKey: minimaxApiKey.value.trim(),
-      minimaxAsrModel: minimaxAsrModel.value.trim() || 'asr-1.0',
-      minimaxBaseUrl: minimaxBaseUrl.value.trim() || 'https://api.minimaxi.com',
     })
     if (result.ok) {
       message.success(t('models.realtimeSaved'))
@@ -96,10 +60,6 @@ async function handleSave() {
       <h3>{{ t('models.realtimeTitle') }}</h3>
       <p class="realtime-models-subtitle">{{ t('models.realtimeSubtitle') }}</p>
     </div>
-
-    <NAlert type="info" :show-icon="false" class="realtime-models-alert">
-      {{ t('models.realtimeSharedHint') }}
-    </NAlert>
 
     <div class="realtime-models-form">
       <div class="realtime-models-field">
@@ -147,67 +107,10 @@ async function handleSave() {
       </div>
     </div>
 
-    <div class="realtime-models-section-divider">
-      <span>{{ t('models.realtimeAsrSectionTitle') }}</span>
-    </div>
-
-    <div class="realtime-models-form">
-      <div class="realtime-models-field">
-        <label>{{ t('models.realtimeAsrProviderLabel') }}</label>
-        <NSelect v-model:value="asrProvider" :options="asrProviderOptions" />
-        <div class="realtime-models-hint">{{ t('models.realtimeAsrProviderHint') }}</div>
-      </div>
-
-      <template v-if="asrProvider === 'minimax'">
-        <div class="realtime-models-field">
-          <label>
-            {{ t('models.realtimeMinimaxApiKey') }}
-            <a
-              href="https://platform.minimax.cn/user-center/basic-information/interface-key"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="realtime-models-link"
-              @click.stop
-            >{{ t('meeting.howToGetApiKey') }}</a>
-          </label>
-          <NInput
-            v-model:value="minimaxApiKey"
-            type="password"
-            show-password-on="click"
-            :placeholder="t('models.realtimeMinimaxApiKeyPlaceholder')"
-          />
-          <div class="realtime-models-hint">{{ t('models.realtimeMinimaxApiKeyHint') }}</div>
-        </div>
-
-        <div class="realtime-models-field">
-          <label>{{ t('models.realtimeMinimaxModelLabel') }}</label>
-          <NInput
-            v-model:value="minimaxAsrModel"
-            :placeholder="t('models.realtimeMinimaxModelPlaceholder')"
-          />
-          <div class="realtime-models-hint">{{ t('models.realtimeMinimaxModelHint') }}</div>
-        </div>
-
-        <div class="realtime-models-field">
-          <label>{{ t('models.realtimeMinimaxBaseUrlLabel') }}</label>
-          <NInput
-            v-model:value="minimaxBaseUrl"
-            :placeholder="t('models.realtimeMinimaxBaseUrlPlaceholder')"
-          />
-          <div class="realtime-models-hint">{{ t('models.realtimeMinimaxBaseUrlHint') }}</div>
-        </div>
-      </template>
-
-      <div class="realtime-models-actions">
-        <NButton
-          type="primary"
-          :loading="saving"
-          data-guide-id="models-realtime-save"
-          @click="handleSave"
-        >
-          {{ t('common.save') }}
-        </NButton>
-      </div>
+    <div>
+      <RouterLink class="realtime-models-link" :to="{ name: 'hermes.models', query: { tab: 'stt' } }">
+        {{ t('models.meetingTranscription.openSettings') }}
+      </RouterLink>
     </div>
   </div>
 </template>
@@ -234,30 +137,6 @@ async function handleSave() {
   font-size: 13px;
   color: $text-secondary;
   line-height: 1.5;
-}
-
-.realtime-models-alert {
-  font-size: 13px;
-}
-
-.realtime-models-section-divider {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 8px 0 -4px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: $text-secondary;
-
-  &::before,
-  &::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: rgba(var(--accent-primary-rgb), 0.18);
-  }
 }
 
 .realtime-models-form {

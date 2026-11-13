@@ -2,6 +2,7 @@
 // 法律沟通场景 · 专属右栏面板：风险雷达 / 各方立场 / 法条依据 / 报告。
 // 注册于 scene-ui-registry（legal 场景）。极简设计令牌与全局一致：
 // 无卡片盒、发丝分隔线、无 emoji 图标。
+import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import { computed, watch, onUnmounted, defineAsyncComponent } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NButton, NSpin } from 'naive-ui'
@@ -58,7 +59,7 @@ watch(() => props.isRecording, async (recording) => {
         body: JSON.stringify({
           sessionId: props.sessionId,
           sceneTemplate: 'legal',
-          profile: session.value?.hermesProfile || undefined,
+          ...resolveMeetingAgent(session.value),
         }),
       })
     } catch { /* best effort */ }
@@ -91,7 +92,7 @@ const {
 } = useReportStream({
   getSessionId: () => props.sessionId,
   getSceneTemplate: () => 'legal',
-  resolveProfile: () => session.value?.hermesProfile || undefined,
+  resolveAgent: () => resolveMeetingAgent(session.value),
   onReportGenerated: (markdown) => emit('report-generated', markdown),
 })
 

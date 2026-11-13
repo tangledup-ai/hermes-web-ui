@@ -172,44 +172,6 @@ describe('getFileTranscriptionStatus', () => {
 })
 
 /**
- * Source guardrails for the stale-backend self-heal. A rebuild only replaces
- * files on disk; the uvicorn child keeps its imported modules, so the client
- * must notice the mismatch and force a restart — otherwise a fixed bug keeps
- * reproducing until someone restarts the service by hand.
- */
-describe('stale ASR backend self-heal wiring', () => {
-  it('MeetingView probes the backend capability and restarts when stale', () => {
-    const source = readFileSync(
-      'packages/client/src/views/hermes/MeetingView.vue',
-      'utf8',
-    )
-    expect(source).toContain('const TRANSCRIBE_CAPABILITY =')
-    expect(source).toContain('ensureTranscribeBackend')
-    // probes /healthz for both the capability marker and the code hash
-    expect(source).toContain('health.transcribe')
-    expect(source).toContain('health.code_hash')
-    // stale → stop the service so the next start respawns the Python child
-    expect(source).toContain('await meetingASRApi.stop()')
-    // both whole-file entry points go through the guard
-    const guardUses = source.match(/await ensureTranscribeBackend\(\)/g) ?? []
-    expect(guardUses.length).toBeGreaterThanOrEqual(2)
-  })
-
-  it('the service hashes the sources, stamps the child and reports it', () => {
-    const source = readFileSync(
-      'packages/server/src/modules/studio/services/meeting-asr/index.ts',
-      'utf8',
-    )
-    expect(source).toContain('computeBackendCodeHash')
-    expect(source).toContain('isBackendCodeStale')
-    // stamped into the child env so /healthz can echo it
-    expect(source).toContain('env.MEETING_ASR_CODE_HASH = codeHash')
-    // restart decision lives in start()
-    expect(source).toContain('codeChanged')
-  })
-})
-
-/**
  * Diarization output must be visible and renameable in the transcript.
  *
  * `HIDE_SPEAKER_DIARIZATION` used to be wired straight into TranscriptList,

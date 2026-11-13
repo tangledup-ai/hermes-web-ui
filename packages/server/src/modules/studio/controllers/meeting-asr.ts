@@ -3,26 +3,41 @@ import { PassThrough } from 'node:stream'
 import http from 'node:http'
 import https from 'node:https'
 import { meetingASRService } from '../services/meeting-asr/index'
-import { REPORT_FALLBACK_MARKER } from '../services/meeting-asr/realtime-assist'
+import { REPORT_FALLBACK_MARKER, type MeetingAnalysisTarget } from '../services/meeting-asr/realtime-assist'
 import { logger } from '../public/logging'
-import { userCanAccessProfile } from '../public/users'
+import { MeetingProfileError, resolveMeetingProfile, resolveMeetingRequestProfile } from '../services/meeting-asr/profile'
+import {
+  meetingTranscriptionRequestContext,
+  MeetingTranscriptionSettingsError,
+  readMeetingTranscriptionSetting,
+  prepareLegacyMeetingTranscriptionSave,
+} from '../services/meeting-asr/transcription-settings'
 
-/**
- * Meeting assist runs against an agent profile's knowledge. Enforce the same
- * profile-ownership rules as the rest of the app for JWT users; loopback
- * server-token callers (the local ASR service itself) and super admins pass.
- * Returns true when access was denied (response already written).
- */
-function denyProfileAccess(ctx: Context, profile: unknown): boolean {
-  if (typeof profile !== 'string' || !profile.trim()) return false
-  const user = ctx.state.user
-  if (!user || user.role === 'super_admin' || ctx.state.serverTokenAuth) return false
-  if (!userCanAccessProfile(user.id, profile.trim())) {
-    ctx.status = 403
-    ctx.body = { error: `Profile "${profile}" is not accessible for this user` }
-    return true
+function meetingAnalysisTarget(ctx: Context, body: Record<string, unknown>): MeetingAnalysisTarget | null {
+  const agentType = body.agentType ?? 'ekko'
+  if ((agentType !== 'ekko' && agentType !== 'hermes') ||
+      [body.profile, body.provider, body.model].some(value => value !== undefined && typeof value !== 'string')) {
+    ctx.status = 400
+    ctx.body = { error: 'Invalid meeting analysis configuration' }
+    return null
   }
-  return false
+  const provider = (body.provider as string | undefined)?.trim() || undefined
+  const model = (body.model as string | undefined)?.trim() || undefined
+  if (Boolean(provider) !== Boolean(model)) {
+    ctx.status = 400
+    ctx.body = { error: 'provider and model are required together' }
+    return null
+  }
+  try {
+    const requested = (body.profile as string | undefined)?.trim() || ctx.state.profile?.name
+    const profile = resolveMeetingProfile(ctx.state.user, requested)
+    return { profile, agentType, provider, model }
+  } catch (error) {
+    if (!(error instanceof MeetingProfileError)) throw error
+    ctx.status = error.status
+    ctx.body = { error: error.message }
+    return null
+  }
 }
 
 /**
@@ -75,7 +90,7 @@ function backendHttpRequest(
   })
 }
 
-async function proxyToBackend(ctx: Context, path: string, method: 'GET' | 'POST' = 'GET', body?: any): Promise<any> {
+async function proxyToBackend(ctx: Context, path: string, method: 'GET' | 'POST' = 'GET', body?: any, headers?: Record<string, string>): Promise<any> {
   const status = meetingASRService.status
   if (!status.isRunning || !status.asrPort) {
     ctx.status = 503
@@ -99,7 +114,7 @@ async function proxyToBackend(ctx: Context, path: string, method: 'GET' | 'POST'
       path,
       method,
       payload,
-      { 'Content-Type': 'application/json' },
+      { 'Content-Type': 'application/json', ...headers },
       // The analysis/HTML routes can be slow on ARM64; keep the old generous
       // ceiling so this refactor does not introduce new timeouts.
       path === '/api/analysis/html' || path.startsWith('/api/analysis/') ? 120_000 : 30_000,
@@ -126,97 +141,24 @@ async function proxyToBackend(ctx: Context, path: string, method: 'GET' | 'POST'
   }
 }
 
+function respondTranscriptionError(ctx: Context, error: unknown, status = 500): void {
+  ctx.status = error instanceof MeetingTranscriptionSettingsError || error instanceof MeetingProfileError ? error.status : status
+  ctx.body = { status: 'error', error: error instanceof Error ? error.message : String(error) }
+}
+
 // Service lifecycle
 export async function startASRService(ctx: Context): Promise<void> {
   try {
-    const config = ctx.request.body as any || {}
-
-    // If no API key provided, check if we have it in stored config
-    if (!config.dashscopeApiKey) {
-      // Try to read from data directory. Resolve the same way as
-      // MeetingASRService.getDataDir() so controller + service agree on the
-      // root. Before this fix, the controller hardcoded process.cwd()/data
-      // which diverged from the service's MEETING_ASR_DATA_DIR override,
-      // so a key saved under the env-overridden data dir was invisible here.
-      const fs = await import('fs/promises')
-      const path = await import('path')
-      const dataDir = config.dataDir
-        || process.env.MEETING_ASR_DATA_DIR
-        || path.join(process.cwd(), 'data', 'meeting-asr')
-
-      // 1. config.json (JSON structure)
-      const configFile = path.join(dataDir, 'config.json')
-      try {
-        const content = await fs.readFile(configFile, 'utf-8')
-        const storedConfig = JSON.parse(content)
-        if (storedConfig.asr?.dashscope_api_key) {
-          config.dashscopeApiKey = storedConfig.asr.dashscope_api_key
-          logger.info('[meeting-asr-ctrl] dashscopeApiKey from config.asr.dashscope_api_key')
-        } else if (storedConfig.llm?.api_key) {
-          config.dashscopeApiKey = storedConfig.llm.api_key
-          logger.info('[meeting-asr-ctrl] dashscopeApiKey fallback from config.llm.api_key')
-        }
-        if (storedConfig.llm?.api_key) {
-          config.llmApiKey = storedConfig.llm.api_key
-        }
-        if (storedConfig.llm?.base_url) {
-          config.llmBaseUrl = storedConfig.llm.base_url
-        }
-        if (storedConfig.llm?.model) {
-          config.llmModel = storedConfig.llm.model
-        }
-      } catch {
-        logger.error('[meeting-asr-ctrl] failed to read config file: %s', configFile)
-      }
-
-      // 2. config.env (shell-style KEY=VALUE). The Python backend writes
-      // DASHSCOPE_API_KEY here via storage.update_config(); if the JSON
-      // path didn't yield a key, this is where it lives.
-      if (!config.dashscopeApiKey) {
-        try {
-          const envFile = path.join(dataDir, 'config.env')
-          const raw = await fs.readFile(envFile, 'utf-8')
-          for (const line of raw.split('\n')) {
-            const trimmed = line.trim()
-            if (!trimmed || trimmed.startsWith('#')) continue
-            const eq = trimmed.indexOf('=')
-            if (eq === -1) continue
-            if (trimmed.slice(0, eq).trim() === 'DASHSCOPE_API_KEY') {
-              let val = trimmed.slice(eq + 1).trim()
-              if ((val.startsWith('"') && val.endsWith('"')) ||
-                  (val.startsWith("'") && val.endsWith("'"))) {
-                val = val.slice(1, -1)
-              }
-              if (val) {
-                config.dashscopeApiKey = val
-                logger.info('[meeting-asr-ctrl] dashscopeApiKey from config.env')
-                break
-              }
-            }
-          }
-        } catch {
-          // config.env missing — not an error, just no key there
-        }
-      }
-
-      if (!config.dashscopeApiKey) {
-        logger.warn('[meeting-asr-ctrl] no dashscopeApiKey found in config.json or config.env')
-      }
-    } else {
-      logger.info('[meeting-asr-ctrl] dashscopeApiKey provided by frontend')
-    }
-
-    await meetingASRService.start(config)
-    ctx.body = {
-      status: 'started',
-      ...meetingASRService.status,
-    }
-  } catch (err) {
-    ctx.status = 500
-    ctx.body = {
-      status: 'error',
-      error: err instanceof Error ? err.message : String(err),
-    }
+    const profile = resolveMeetingRequestProfile(ctx)
+    const config = (ctx.request.body ?? {}) as Parameters<typeof meetingASRService.start>[0]
+    const saveLegacy = prepareLegacyMeetingTranscriptionSave(profile, config, { allowCustomEndpoints: ctx.state?.user?.role === 'super_admin' })
+    // The managed child is shared; per-profile ASR credentials and defaults
+    // are injected by the audio transport, independent of startup order.
+    await meetingASRService.start(profile === 'default' ? config : {})
+    saveLegacy()
+    ctx.body = { status: 'started', ...meetingASRService.status }
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
   }
 }
 
@@ -241,15 +183,14 @@ export async function getASRStatus(ctx: Context): Promise<void> {
 
 export async function updateASRConfig(ctx: Context): Promise<void> {
   try {
-    const config = ctx.request.body as any
-    await meetingASRService.updateConfig(config)
+    const profile = resolveMeetingRequestProfile(ctx)
+    const config = ctx.request.body as Parameters<typeof meetingASRService.updateConfig>[0]
+    const saveLegacy = prepareLegacyMeetingTranscriptionSave(profile, config, { allowCustomEndpoints: ctx.state?.user?.role === 'super_admin' })
+    if (profile === 'default') await meetingASRService.updateConfig(config)
+    saveLegacy()
     ctx.body = { status: 'ok', message: 'Configuration updated' }
-  } catch (err) {
-    ctx.status = 500
-    ctx.body = {
-      status: 'error',
-      error: err instanceof Error ? err.message : String(err),
-    }
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
   }
 }
 
@@ -259,11 +200,49 @@ export async function proxyHealthCheck(ctx: Context): Promise<void> {
 }
 
 export async function getCurrentConfig(ctx: Context): Promise<void> {
-  await proxyToBackend(ctx, '/api/config')
+  try {
+    const profile = resolveMeetingRequestProfile(ctx)
+    const legacy = await proxyToBackend(ctx, '/api/config')
+    if (!legacy || ctx.status >= 400) return
+    const config = await readMeetingTranscriptionSetting(profile)
+    ctx.body = {
+      asr: {
+        paraformer_ws_url: config.paraformerWsUrl,
+        paraformer_model: config.paraformerModel,
+        paraformer_language_hints: config.paraformerLanguageHints,
+        paraformer_sample_rate: legacy.asr?.paraformer_sample_rate,
+        paraformer_format: legacy.asr?.paraformer_format,
+        paraformer_semantic_punctuation: legacy.asr?.paraformer_semantic_punctuation,
+        dashscope_api_key: '',
+        dashscope_api_key_masked: config.dashscopeKeyConfigured ? '****' : '',
+        minimax_asr_model: config.minimaxAsrModel,
+        minimax_base_url: config.minimaxBaseUrl,
+        minimax_api_key: '',
+        minimax_api_key_masked: config.minimaxKeyConfigured ? '****' : '',
+      },
+      llm: profile === 'default' ? { ...legacy.llm, api_key: '' } : { api_key: '' },
+      analysis: profile === 'default' ? legacy.analysis : undefined,
+    }
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
+  }
 }
 
 export async function updateCurrentConfig(ctx: Context): Promise<void> {
-  await proxyToBackend(ctx, '/api/config', 'POST', ctx.request.body)
+  try {
+    const profile = resolveMeetingRequestProfile(ctx)
+    const body = ctx.request.body as { asr?: unknown } | undefined
+    const saveLegacy = prepareLegacyMeetingTranscriptionSave(profile, body?.asr, { pythonFields: true, allowCustomEndpoints: ctx.state?.user?.role === 'super_admin' })
+    if (profile === 'default') {
+      await proxyToBackend(ctx, '/api/config', 'POST', body)
+      if (ctx.status >= 400) return
+    } else {
+      ctx.body = { status: 'ok' }
+    }
+    saveLegacy()
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
+  }
 }
 
 // Analysis endpoints
@@ -349,15 +328,18 @@ export async function getSceneTemplates(ctx: Context): Promise<void> {
 // Realtime assist
 export async function startAssist(ctx: Context): Promise<void> {
   const { realtimeAssistService } = await import('../services/meeting-asr/realtime-assist')
-  const { sessionId, sceneTemplate, profile, speechContext } = ctx.request.body as any || {}
+  const body = ctx.request.body as any || {}
+  const { sessionId, sceneTemplate, speechContext } = body
   if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) {
     ctx.status = 400
     ctx.body = { error: 'sessionId is required' }
     return
   }
-  if (denyProfileAccess(ctx, profile)) return
-  await realtimeAssistService.startSession(sessionId, sceneTemplate || 'general', profile, speechContext || null, ctx.state.user?.id)
-  ctx.body = { status: 'started', sessionId, sceneTemplate: sceneTemplate || 'general', profile: profile || null }
+  const target = meetingAnalysisTarget(ctx, body)
+  if (!target) return
+  const scene = typeof sceneTemplate === 'string' && sceneTemplate ? sceneTemplate : 'general'
+  await realtimeAssistService.startSession(sessionId, scene, target, speechContext, ctx.state.user?.id)
+  ctx.body = { status: 'started', sessionId, sceneTemplate: scene, profile: target.profile }
 }
 
 export async function stopAssist(ctx: Context): Promise<void> {
@@ -415,43 +397,40 @@ export async function pushAssistSentence(ctx: Context): Promise<void> {
 // Report generation (SSE streaming)
 export async function streamReport(ctx: Context): Promise<void> {
   const { realtimeAssistService } = await import('../services/meeting-asr/realtime-assist')
-  const { sessionId, sceneTemplate, transcript, profile } = (ctx.request.body as any) || {}
+  const body = (ctx.request.body as Record<string, unknown> | undefined) || {}
+  const { sessionId, sceneTemplate, transcript } = body
 
-  if (!sessionId || !transcript) {
+  if (typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 200 ||
+      typeof transcript !== 'string' || !transcript.trim()) {
     ctx.status = 400
     ctx.body = { error: 'sessionId and transcript are required' }
     return
   }
-  if (denyProfileAccess(ctx, profile)) return
+  const target = meetingAnalysisTarget(ctx, body)
+  if (!target) return
+  const scene = typeof sceneTemplate === 'string' && sceneTemplate ? sceneTemplate : 'general'
 
   ctx.type = 'text/event-stream'
   ctx.set('Cache-Control', 'no-cache')
   ctx.set('Connection', 'keep-alive')
   ctx.status = 200
 
-  // 使用 Node.js PassThrough 流（Koa 原生支持管道传输）。
-  // 注意：WHATWG Web ReadableStream 会被 Koa 序列化为 {}，不能直接用作 ctx.body。
   const passthrough = new PassThrough()
+  const controller = new AbortController()
+  passthrough.once('close', () => controller.abort())
   ctx.body = passthrough
 
   void (async () => {
     try {
-      const stream = realtimeAssistService.generateReportStream(sessionId, transcript, sceneTemplate, profile)
+      const stream = realtimeAssistService.generateReportStream(sessionId, transcript, scene, target, controller.signal)
       for await (const chunk of stream) {
-        // 服务层会在「agent 中途失败、回退到 direct LLM」时 yield 一个 Symbol sentinel；
-        // 把它翻译成专用的 SSE 控制帧，前端识别后清空已累积的部分内容，
-        // 再继续接收 LLM 的真实 chunks。Symbol 永远不会出现在 LLM 文本里，安全。
-        if (typeof chunk === 'symbol' && chunk === REPORT_FALLBACK_MARKER) {
-          passthrough.write(`data: ${JSON.stringify({ fallback: true })}\n\n`)
-          continue
-        }
-        passthrough.write(`data: ${JSON.stringify({ text: chunk })}\n\n`)
+        if (controller.signal.aborted) return
+        const event = chunk === REPORT_FALLBACK_MARKER ? { fallback: true } : { text: chunk }
+        passthrough.write(`data: ${JSON.stringify(event)}\n\n`)
       }
       passthrough.write('data: [DONE]\n\n')
     } catch (err) {
-      // 上游错误（LLM 流中断 / provider 返回错误帧 / agent bridge 失败），
-      // 之前 String(err) 会把整个 stack 字符串化塞给前端；这里只保留可读 message，
-      // 同时附上完整 error 的 type，方便前端归类（timeout / network / llm / agent / unknown）。
+      if (controller.signal.aborted) return
       const message = err instanceof Error ? err.message : String(err)
       const errorType = err instanceof Error ? err.name : 'UnknownError'
       passthrough.write(`data: ${JSON.stringify({ error: { message, type: errorType } })}\n\n`)
@@ -461,31 +440,19 @@ export async function streamReport(ctx: Context): Promise<void> {
   })()
 }
 
-// Note: transcripts and prompts were removed as dead code (v0.7.6 audit #17).
-// Frontend manages transcript locally via meetingStore; prompts are configured
-// via /api/studio/meeting-asr/config and used by the Python analysis service directly.
-
-/**
- * 会议自动命名（首次 AI 分析完成时，前端基于当前已有转写调用一次，拿到简短标题）。
- * 走 meeting-asr 直调 LLM 快路径（config.json），任一步失败都返回 { title: null }，
- * 不打断会议主流程（最终报告标题行仍会兜底命名）。
- */
 export async function meetingTitle(ctx: Context): Promise<void> {
-  const { transcript } = (ctx.request.body as any) || {}
+  const body = (ctx.request.body as Record<string, unknown> | undefined) || {}
+  const { transcript } = body
   if (!transcript || typeof transcript !== 'string' || !transcript.trim()) {
     ctx.status = 400
     ctx.body = { error: 'transcript is required' }
     return
   }
 
-  try {
-    const { generateMeetingTitle } = await import('../services/meeting-asr/direct-llm')
-    const title = await generateMeetingTitle(transcript)
-    ctx.body = { title }
-  } catch (err) {
-    logger.warn('[meeting-asr-ctrl] meetingTitle failed: %s', err instanceof Error ? err.message : String(err))
-    ctx.body = { title: null }
-  }
+  const target = meetingAnalysisTarget(ctx, body)
+  if (!target) return
+  const { generateMeetingTitle } = await import('../services/meeting-asr/direct-llm')
+  ctx.body = { title: await generateMeetingTitle(transcript, target) }
 }
 
 // ── Whole-file transcription (batch) ─────────────────────────────────────
@@ -510,10 +477,11 @@ function requestBackendRaw(
   source: NodeJS.ReadableStream,
   contentType: string,
   contentLength?: number,
+  contextHeaders?: Record<string, string>,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const transport = useTls ? https : http
-    const headers: Record<string, string> = { 'Content-Type': contentType }
+    const headers: Record<string, string> = { 'Content-Type': contentType, ...contextHeaders }
     if (contentLength && Number.isFinite(contentLength)) {
       headers['Content-Length'] = String(contentLength)
     }
@@ -549,10 +517,10 @@ function requestBackendRaw(
 }
 
 /** Map the client's camelCase query keys onto the Python snake_case ones. */
-function buildTranscribeQuery(ctx: Context): string {
+function buildTranscribeQuery(ctx: Context, defaultEngine: string): string {
   const q = ctx.query || {}
   const params = new URLSearchParams()
-  const engine = String(q.engine ?? 'minimax')
+  const engine = String(q.engine ?? defaultEngine)
   params.set('engine', engine === 'qwen' || engine === 'dashscope' ? 'qwen' : 'minimax')
   const diarize = String(q.diarize ?? 'false')
   params.set('diarize', diarize === 'true' || diarize === '1' ? 'true' : 'false')
@@ -578,8 +546,10 @@ export async function startFileTranscription(ctx: Context): Promise<void> {
     return
   }
 
-  const query = buildTranscribeQuery(ctx)
   try {
+    const profile = resolveMeetingRequestProfile(ctx)
+    const { provider, headers } = await meetingTranscriptionRequestContext(profile, ctx.state?.user?.id)
+    const query = buildTranscribeQuery(ctx, provider)
     const result = await requestBackendRaw(
       status.asrPort,
       !!status.useTls,
@@ -587,6 +557,7 @@ export async function startFileTranscription(ctx: Context): Promise<void> {
       ctx.req,
       ctx.request.type || 'application/octet-stream',
       declared || undefined,
+      headers,
     )
     ctx.status = result.status
     try {
@@ -595,8 +566,7 @@ export async function startFileTranscription(ctx: Context): Promise<void> {
       ctx.body = result.body
     }
   } catch (err) {
-    ctx.status = 502
-    ctx.body = { error: `Failed to proxy audio to ASR backend: ${err}` }
+    respondTranscriptionError(ctx, err, 502)
   }
 }
 
@@ -607,5 +577,11 @@ export async function getFileTranscriptionStatus(ctx: Context): Promise<void> {
     ctx.body = { error: 'invalid jobId' }
     return
   }
-  await proxyToBackend(ctx, `/api/transcribe/status/${jobId}`)
+  try {
+    const profile = resolveMeetingRequestProfile(ctx)
+    const { headers } = await meetingTranscriptionRequestContext(profile, ctx.state?.user?.id, 'job-status')
+    await proxyToBackend(ctx, `/api/transcribe/status/${jobId}`, 'GET', undefined, headers)
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
+  }
 }

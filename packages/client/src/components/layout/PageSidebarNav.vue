@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { isPluginEnabled } from '@/plugins/types'
-import { deploymentUrl } from '@/utils/deployment-url'
 import { computed } from 'vue'
 import { NTooltip } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -10,7 +9,7 @@ import { useSessionSearch } from '@/composables/useSessionSearch'
 import DesktopUpdateDownloadTab from './DesktopUpdateDownloadTab.vue'
 import { useNavigationRail } from '@/composables/useNavigationRail'
 
-type ActiveSection = 'person' | 'chat' | 'history' | 'connections' | 'agents' | 'models' | 'usage' | 'apiRelay' | 'group' | 'global' | 'workflow' | 'meeting'
+type ActiveSection = 'person' | 'chat' | 'history' | 'connections' | 'agents' | 'models' | 'usage' | 'group' | 'global' | 'workflow' | 'meeting'
 
 const props = defineProps<{
   active: ActiveSection
@@ -72,10 +71,6 @@ function openWorkflow() {
   void router.push({ name: 'hermes.workflow' })
 }
 
-function openApiRelay() {
-  if (props.active === 'apiRelay') return
-  void router.push({ name: 'hermes.apiRelay' })
-}
 </script>
 
 <template>
@@ -205,10 +200,6 @@ function openApiRelay() {
         </svg>
         <span>{{ t('sidebar.usage') }}</span>
       </button>
-      <button v-if="!hasNavigationRail" class="page-sidebar-tab" :class="{ active: active === 'apiRelay' }" type="button" :aria-label="t('sidebar.apiRelay')" :aria-current="active === 'apiRelay' ? 'page' : undefined" @click="openApiRelay">
-        <img class="api-relay-logo" :src="deploymentUrl('/relay-logo.png')" width="18" height="18" alt="" aria-hidden="true" />
-        <span>{{ t('sidebar.apiRelay') }}</span>
-      </button>
     </div>
     <div v-if="!hasNavigationRail" class="conversation-switch conversation-switch--four" role="tablist" aria-label="Conversation type">
       <NTooltip trigger="hover" placement="top">
@@ -336,7 +327,6 @@ function openApiRelay() {
   .page-sidebar-primary span { display: none; }
 }
 
-.api-relay-logo { border-radius: var(--radius-component, 4px); }
 
 .page-sidebar-tab {
   width: 100%;

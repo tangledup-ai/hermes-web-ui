@@ -153,6 +153,8 @@ export async function *readServerSentEvents(response: Response): AsyncIterable<s
         if (event) yield event
       }
     }
+    const event = parseServerSentEventLine(buffer + decoder.decode())
+    if (event) yield event
   } finally {
     reader.releaseLock()
   }

@@ -6,6 +6,7 @@ import { useMeetingAssist } from '@/composables/useMeetingAssist'
 import { useReportStream } from '@/composables/useReportStream'
 import { request } from '@/api/client'
 import { useMeetingStore } from '@/stores/hermes/meeting'
+import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import MeetingExportDropdown from './MeetingExportDropdown.vue'
 
 const MarkdownRenderer = defineAsyncComponent(async () => (await import('@/components/hermes/chat/MarkdownRenderer.vue')).default)
@@ -14,22 +15,14 @@ const props = withDefaults(defineProps<{
   sessionId: string
   sceneTemplate?: string
   isRecording?: boolean
-  // meeting 分支兼容：触发一次分析（当前 assist 架构下为占位，供后续接线）
-  startTrigger?: number
 }>(), {
   sceneTemplate: 'general',
   isRecording: false,
-  startTrigger: 0,
 })
 
 const emit = defineEmits<{
   (e: 'report-generated', markdown: string): void
   (e: 'request-report'): void
-  // meeting 分支兼容事件（assist 架构下暂不触发，保留契约供视图侧处理器）
-  (e: 'update:analysisResult', result: any): void
-  (e: 'update:reportHtml', html: string): void
-  (e: 'completed'): void
-  (e: 'corrected', sentences: any[]): void
 }>()
 
 const { t } = useI18n()
@@ -60,24 +53,8 @@ const sceneLabelMap: Record<string, string> = {
   speech: t('meeting.scene.speech'),
 }
 
-// 分析模式标签
-const analysisModeLabel = computed(() => {
-  const session = currentSession.value
-  if (!session) return ''
-  return session.analysisMode === 'hermes' ? 'Hermes Agent' : t('meeting.customModel')
-})
-
-// Agent 类型标签
-const agentTypeLabel = computed(() => {
-  const session = currentSession.value
-  if (!session?.agentConfig) return 'Hermes Agent'
-  const typeMap: Record<string, string> = {
-    'hermes': 'Hermes Agent',
-    'claude-code': 'Claude Code',
-    'codex': 'Codex',
-  }
-  return typeMap[session.agentConfig.agentType] || 'Hermes Agent'
-})
+const agent = computed(() => resolveMeetingAgent(currentSession.value))
+const agentTypeLabel = computed(() => agent.value.agentType === 'hermes' ? 'Hermes Agent' : 'Ekko Agent')
 
 // 句子数量
 const sentenceCount = computed(() => currentSession.value?.sentences.length || 0)
@@ -89,12 +66,6 @@ onMounted(() => {
     rounds.value = [...session.analysisRounds]
   }
 })
-
-// 解析本会议使用的 Hermes profile（供服务端加载该 profile 下的分析技能）
-function resolveProfile(): string | undefined {
-  const session = meetingStore.sessions.find(s => s.id === props.sessionId)
-  return session?.hermesProfile || undefined
-}
 
 // 新分析到达时同步持久化到 store
 watch(rounds, (newRounds) => {
@@ -112,9 +83,14 @@ const {
 } = useReportStream({
   getSessionId: () => props.sessionId,
   getSceneTemplate: () => props.sceneTemplate,
-  resolveProfile,
+  resolveAgent: () => agent.value,
   onReportGenerated: (markdown) => emit('report-generated', markdown),
 })
+
+watch(() => currentSession.value?.htmlContent, (report) => {
+  if (isGeneratingReport.value) return
+  reportMarkdown.value = report && !/^\s*(<!doctype\b|<html[\s>])/i.test(report) ? report : ''
+}, { immediate: true })
 
 // Rounds container ref for auto-scroll
 const roundsContainer = ref<HTMLElement | null>(null)
@@ -131,9 +107,6 @@ const sceneLabel = computed(() => {
   }
   return map[props.sceneTemplate] || map.general
 })
-
-// Whether there has been any content (rounds or recording happened)
-const hasContent = computed(() => rounds.value.length > 0 || reportMarkdown.value.length > 0)
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -161,7 +134,7 @@ watch(() => props.isRecording, async (recording) => {
     try {
       await request('/api/studio/meeting-asr/assist/start', {
         method: 'POST',
-        body: JSON.stringify({ sessionId: props.sessionId, sceneTemplate: props.sceneTemplate, profile: resolveProfile() }),
+        body: JSON.stringify({ sessionId: props.sessionId, sceneTemplate: props.sceneTemplate, ...agent.value }),
       })
     } catch { /* best effort */ }
   } else {
@@ -219,9 +192,6 @@ onUnmounted(() => {
             </NTag>
             <NTag size="small" type="success" :bordered="false">
               {{ agentTypeLabel }}
-            </NTag>
-            <NTag v-if="currentSession?.analysisMode" size="small" type="warning" :bordered="false">
-              {{ analysisModeLabel }}
             </NTag>
           </div>
 
@@ -318,8 +288,8 @@ onUnmounted(() => {
     </div>
 
     <!-- Report action bar (shown when recording stopped and no report yet) -->
-    <div v-if="!isRecording && !reportMarkdown && !isGeneratingReport" class="report-action-bar">
-      <NButton type="primary" size="small" :disabled="!hasContent" @click="emit('request-report')">
+    <div v-if="!isRecording && !isGeneratingReport && !reportError" class="report-action-bar">
+      <NButton type="primary" size="small" :disabled="sentenceCount === 0" @click="emit('request-report')">
         {{ t('meeting.reportPanel.generate') }}
       </NButton>
     </div>

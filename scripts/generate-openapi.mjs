@@ -2144,6 +2144,87 @@ for (const [method, path, tag, operationId, summary, properties, required] of co
     ...(properties ? { requestBody: { required: required.length > 0, content: { 'application/json': { schema: { type: 'object', properties, required } } } } } : {}) }
 }
 openapi.paths['/api/studio/chat-run/runs'].post.responses['202'] = { description: 'Run accepted or queued; JSON includes status, session_id and available run_id/queue_id' }
+
+const meetingProfileSchema = { type: 'string', maxLength: 128 }
+const meetingSessionIdSchema = { type: 'string', minLength: 1, maxLength: 200 }
+const meetingAnalysisFields = {
+  profile: meetingProfileSchema,
+  agentType: { type: 'string', enum: ['ekko', 'hermes'], default: 'ekko',
+    description: 'Report runtime. Live analysis and titles use the configured text model.' },
+  provider: { type: 'string', minLength: 1, description: 'Provider ID from Model Configuration. Supply model with this field.' },
+  model: { type: 'string', minLength: 1, description: 'Model ID from the selected provider. Omit both fields to use the Profile default.' },
+}
+const meetingSceneSchema = { type: 'string', default: 'general' }
+const meetingTranscriptSchema = { type: 'string', minLength: 1 }
+const meetingAnalysisOperations = [
+  ['assist/start', 'Start live meeting analysis', ['sessionId'], {
+    sessionId: meetingSessionIdSchema, sceneTemplate: meetingSceneSchema, speechContext: { type: 'object' },
+  }, { type: 'object', required: ['status', 'sessionId', 'sceneTemplate', 'profile'], properties: {
+    status: { type: 'string', enum: ['started'] }, sessionId: meetingSessionIdSchema,
+    sceneTemplate: meetingSceneSchema, profile: meetingProfileSchema,
+  } }],
+  ['report/stream', 'Generate a meeting report', ['sessionId', 'transcript'], {
+    sessionId: meetingSessionIdSchema, transcript: meetingTranscriptSchema, sceneTemplate: meetingSceneSchema,
+  }, { type: 'string' }],
+  ['title', 'Suggest a meeting title', ['transcript'], {
+    transcript: meetingTranscriptSchema,
+  }, { type: 'object', required: ['title'], properties: { title: { type: 'string', nullable: true, maxLength: 40 } } }],
+]
+for (const [suffix, summary, required, fields, result] of meetingAnalysisOperations) {
+  const operation = openapi.paths[`/api/studio/meeting-asr/${suffix}`].post
+  const stream = suffix === 'report/stream'
+  operation.summary = summary
+  operation.requestBody = { required: true, content: { 'application/json': { schema: {
+    type: 'object', properties: { ...fields, ...meetingAnalysisFields }, required,
+    anyOf: [{ required: ['provider', 'model'] }, { not: { anyOf: [{ required: ['provider'] }, { required: ['model'] }] } }],
+  } } } }
+  operation.responses['200'] = {
+    description: stream
+      ? 'SSE data frames contain {text} chunks, {fallback: true} to reset text after a Hermes fallback, or {error: {message, type}}. A successful stream ends with [DONE].'
+      : 'JSON result',
+    content: { [stream ? 'text/event-stream' : 'application/json']: { schema: result } },
+  }
+  operation.responses['403'] = { description: 'Profile access denied' }
+}
+
+const transcriptionSettingFields = {
+  asrProvider: { type: 'string', enum: ['dashscope', 'minimax'] },
+  ...Object.fromEntries([
+    'asrModel', 'paraformerModel', 'paraformerWsUrl', 'paraformerLanguageHints',
+    'minimaxAsrModel', 'minimaxBaseUrl', 'ossBucket', 'ossEndpoint', 'ossPathPrefix',
+  ].map(name => [name, { type: 'string', maxLength: 300 }])),
+}
+const transcriptionSettingFlags = Object.fromEntries([
+  'saved', 'dashscopeKeyConfigured', 'minimaxKeyConfigured', 'ossAccessKeyIdConfigured',
+  'ossAccessKeySecretConfigured', 'ossConfigured',
+].map(name => [name, { type: 'boolean', readOnly: true }]))
+const transcriptionSettingProperties = { ...transcriptionSettingFields, ...transcriptionSettingFlags }
+const transcriptionSettings = openapi.paths['/api/studio/models/meeting-transcription']
+for (const method of ['get', 'put']) {
+  const operation = transcriptionSettings[method]
+  operation.summary = method === 'get' ? 'Read meeting transcription settings' : 'Update meeting transcription settings'
+  operation.description = 'Meeting transcription provider, model, storage configuration, and credential availability for the selected Profile.'
+  operation.parameters = [
+    { name: 'profile', in: 'query', schema: meetingProfileSchema, description: 'Authorized Profile. Omit to use your active or default Profile.' },
+  ]
+  operation.responses['200'] = { description: 'Effective transcription settings', content: { 'application/json': { schema: {
+    type: 'object', required: ['setting'], properties: { setting: {
+      type: 'object', required: Object.keys(transcriptionSettingProperties), properties: transcriptionSettingProperties,
+    } },
+  } } } }
+  operation.responses['403'] = { description: 'Profile access denied or custom endpoint requires super administrator access' }
+}
+transcriptionSettings.put.requestBody = { required: true, content: { 'application/json': { schema: {
+  type: 'object', properties: {
+    ...transcriptionSettingFields,
+    ...Object.fromEntries(['dashscopeApiKey', 'minimaxApiKey', 'ossAccessKeyId', 'ossAccessKeySecret'].map(name => [name, {
+      type: 'string', maxLength: 1000, writeOnly: true,
+      description: 'Omit to retain the existing credential. Use an empty string to clear it.',
+    }])),
+    migrateLegacy: { type: 'boolean', description: 'Import missing fields without overwriting existing Profile settings.' },
+  },
+} } } }
+
 const pluginOperations = [
   ['get', '/development', 'listStudioDevelopmentPlugins', 'List locally registered development projects and build status; super administrator login required', null],
   ['post', '/{id}/development', 'startStudioPluginDevelopment', 'Trust, build, enable and watch a registered project; existing configuration and data are preserved', { revision: { type: 'integer' }, trusted: { type: 'boolean', enum: [true] } }],

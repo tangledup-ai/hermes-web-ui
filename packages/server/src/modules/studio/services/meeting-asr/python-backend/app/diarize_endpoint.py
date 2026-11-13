@@ -270,10 +270,7 @@ async def diarize_ws_handler(ws: WebSocket) -> None:
                 session._pending_tasks.clear()
             # Cleanup OSS files for this session
             try:
-                loop = asyncio.get_running_loop()
-                deleted_count = await loop.run_in_executor(
-                    None, cleanup_session_files, session.session_id
-                )
+                deleted_count = await asyncio.to_thread(cleanup_session_files, session.session_id)
                 log.info("Cleaned up %d OSS files for session %s", deleted_count, session.session_id)
             except Exception as cleanup_exc:
                 log.error("Failed to cleanup OSS files: %s", cleanup_exc)

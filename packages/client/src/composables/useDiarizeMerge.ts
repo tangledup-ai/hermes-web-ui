@@ -1,6 +1,6 @@
 import { nextTick, type Ref } from 'vue'
 import { useMeetingStore } from '@/stores/hermes/meeting'
-import type { TranscriptSentence } from '@/stores/hermes/meeting'
+import type { MeetingSession, TranscriptSentence } from '@/stores/hermes/meeting'
 
 export interface UseDiarizeMergeDeps {
   /** ASR 实时句子流（回填/追加目标） */
@@ -171,101 +171,56 @@ export function useDiarizeMerge(deps: UseDiarizeMergeDeps) {
     })
   }
 
-  /**
-   * 整段音频转录 / 事后「拆分人声」结果写入。
-   * 与上面两个实时 chunk 合并函数的区别：
-   *  - `diarize === false` 时完全不写 speaker 字段（避免把 `speaker_id: -1`
-   *    渲染成"说话人 1"）；
-   *  - 依据当前是否已有转写自动选择策略：已有实时转写 → 按时间戳回填说话人
-   *    （不覆盖用户已编辑的文本）；空转写（直接音频转录）→ 整体写入。
-   *
-   * @returns 新增（或回填）的句子数量
-   */
   function applyFileTranscriptionResult(
-    sentences: FileTranscriptionSentenceInput[],
-    options: { diarize: boolean } = { diarize: true },
-  ): number {
-    const diarize = options.diarize
-    const merge = deps.finalSentences.value.length > 0
+    session: MeetingSession,
+    result: FileTranscriptionSentenceInput[],
+    diarize: boolean,
+  ) {
+    const sentences = session.sentences.map(sentence => ({ ...sentence }))
+    const speakerMap = { ...session.speakerMap }
+    const speakers = [...session.speakers]
+    const hadTranscript = sentences.length > 0
     const timeThreshold = 2000
     let changed = 0
-    // 整段转录首次出现的说话人要登记进 session.speakers（重命名/Agent 提示词
-    // 都读这份列表），每个说话人只写一次，避免逐句触发 localStorage 写入。
-    const registeredSpeakers = new Set<string>()
 
-    for (const item of sentences) {
-      const text = (item.text || '').trim()
+    for (const item of result) {
+      const text = item.text.trim()
       if (!text) continue
-      const startMs = item.begin_ms || 0
-      const endMs = item.end_ms || startMs
-
+      const startTime = item.begin_ms || 0
+      const endTime = item.end_ms || startTime
+      const speakerId = diarize && typeof item.speaker_id === 'number' && item.speaker_id >= 0
+        ? String(item.speaker_id)
+        : undefined
       let speaker: string | undefined
-      let speakerId: string | undefined
-      if (diarize && typeof item.speaker_id === 'number' && item.speaker_id >= 0) {
-        speakerId = String(item.speaker_id)
-        if (!deps.speakerMap.value[speakerId]) {
-          deps.speakerMap.value[speakerId] = `说话人 ${Object.keys(deps.speakerMap.value).length + 1}`
-        }
-        const session = meetingStore.activeSession
-        const registeredName = session?.speakers.find(s => String(s.id) === speakerId)?.displayName
-        speaker = registeredName || deps.speakerMap.value[speakerId]
-        if (session && speaker && !registeredSpeakers.has(speakerId)) {
-          registeredSpeakers.add(speakerId)
-          if (!session.speakers.some(s => String(s.id) === speakerId)) {
-            // 复用现有 action：speakerId 尚无句子时它只登记说话人本身
-            meetingStore.renameSpeaker(session.id, speakerId, speaker)
-          }
-        }
+      if (speakerId !== undefined) {
+        const registered = speakers.find(entry => String(entry.id) === speakerId)
+        speaker = registered?.displayName || speakerMap[speakerId]
+          || `说话人 ${Object.keys(speakerMap).length + 1}`
+        speakerMap[speakerId] = speaker
+        if (!registered) speakers.push({ id: speakerId, displayName: speaker })
       }
 
-      // 已有实时转写：只回填说话人，避免整段结果覆盖用户编辑过的文本。
-      if (merge && diarize && speaker) {
-        const target = deps.finalSentences.value.find(asrSent =>
-          !asrSent.speakerId
-          && Math.abs((asrSent.startTime || 0) - startMs) < timeThreshold
-          && Math.abs((asrSent.endTime || 0) - endMs) < timeThreshold,
-        )
+      // Keep edited text when matching a speaker to an existing live sentence.
+      if (hadTranscript && speaker) {
+        const target = sentences.find(sentence => !sentence.speakerId
+          && Math.abs((sentence.startTime || 0) - startTime) < timeThreshold
+          && Math.abs((sentence.endTime || 0) - endTime) < timeThreshold)
         if (target) {
           target.speaker = speaker
           target.speakerId = speakerId
-          if (meetingStore.activeSessionId) {
-            meetingStore.updateSentence(meetingStore.activeSessionId, target)
-          }
           changed++
           continue
         }
       }
+      if (sentences.some(sentence => sentence.text === text
+        && Math.abs((sentence.startTime || 0) - startTime) < timeThreshold)) continue
 
-      // 不覆盖已有文本：同文本 + 时间接近视为重复（overlap / 重复触发）。
-      const isDuplicate = deps.finalSentences.value.some(s =>
-        s.text === text && Math.abs((s.startTime || 0) - startMs) < timeThreshold,
-      )
-      if (isDuplicate) continue
-
-      const sentenceObj: TranscriptSentence = {
-        text,
-        timestamp: Date.now(),
-        startTime: startMs,
-        endTime: endMs,
-        ...(speaker ? { speaker, speakerId } : {}),
-      }
-      deps.finalSentences.value.push(sentenceObj)
+      sentences.push({ text, timestamp: Date.now(), startTime, endTime, speaker, speakerId })
       changed++
-
-      if (meetingStore.activeSessionId) {
-        meetingStore.addSentence(meetingStore.activeSessionId, sentenceObj)
-        deps.pushSentenceToAssist(meetingStore.activeSessionId, sentenceObj)
-      }
     }
 
-    deps.finalSentences.value.sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
-
-    nextTick(() => {
-      const container = document.getElementById('transcript-container')
-      if (container) container.scrollTop = container.scrollHeight
-    })
-
-    return changed
+    sentences.sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
+    return { sentences, speakerMap, speakers, changed }
   }
 
   return { addDiarizeResultDirectly, matchAndMergeDiarizeResult, applyFileTranscriptionResult }

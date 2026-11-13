@@ -2,9 +2,8 @@ import { getWebUiHome } from '../../public/config'
 import fs from 'fs/promises'
 import path from 'path'
 import { logger } from '../../public/logging'
-import { getProfileDir } from '../../public/profile-config'
-import { PROVIDER_ENV_MAP, readConfigYamlForProfile } from '../../public/profile-config'
-import { getCompatibleCustomProviders, type NormalizedCustomProvider } from '../../contracts/provider-compat'
+import { streamConfiguredMeetingModel, type MeetingModelRequest, type MeetingModelTarget } from '../../public/meeting-runtime'
+import { readSseFrames } from '../chat-run/sse-utils'
 import type { SceneTemplate } from './scene-templates'
 import { REPORT_TITLE_INSTRUCTION } from './scene-templates'
 import { prepareAnalysisSkillSection } from './skill-resolver'
@@ -21,24 +20,14 @@ export interface SpeechSummary {
   score?: Record<string, number>
 }
 
-/**
- * Direct LLM 路径（拆分自 realtime-assist.ts，行为保持一致）。
- *
- * 不经过 Hermes Agent、直接调用 OpenAI 兼容端点的所有请求都在这里：
- * 实时批次的快速分析（~3s 主路径）与报告生成的流式 fallback。
- * fetch 与 LLM 配置读取都可注入，便于单测。
- */
-
-export interface LLMConfig {
+interface LLMConfig {
   apiKey: string
   baseUrl: string
   model: string
 }
 
-export interface DirectLLMDeps {
-  /** 注入 fetch 实现（单测用）；默认全局 fetch。 */
+interface DirectLLMDeps {
   fetchImpl?: typeof fetch
-  /** 注入 LLM 配置读取（单测用）；默认读 dataDir/config.json。 */
   loadConfig?: () => Promise<LLMConfig | null>
 }
 
@@ -50,18 +39,8 @@ function fmtClock(ms: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-/**
- * 读取 meeting-asr 持久化目录里的 LLM 配置（config.json）。
- *
- * 路径解析与 MeetingASRService.getDataDir() 保持一致（而不是只 mirror 它的
- * cwd fallback）：设备端 deploy 会通过 MEETING_ASR_DATA_DIR 指到
- * /var/lib/hermes-web-ui/meeting-asr，若这里只读 <cwd>/data/meeting-asr，
- * 服务跑在 /opt/hermes-web-ui/src 下就会读不到 config.json（那下面只有
- * .venv），导致实时分析一直报 "LLM config not available"。
- */
-export async function loadLLMConfig(dataDir?: string): Promise<LLMConfig | null> {
-  const dir = dataDir
-    || process.env.MEETING_ASR_DATA_DIR?.trim()
+async function loadLegacyLLMConfig(): Promise<LLMConfig | null> {
+  const dir = process.env.MEETING_ASR_DATA_DIR?.trim()
     || path.join(getWebUiHome(), 'meeting-asr')
   const configFile = path.join(dir, 'config.json')
 
@@ -69,7 +48,7 @@ export async function loadLLMConfig(dataDir?: string): Promise<LLMConfig | null>
     const content = await fs.readFile(configFile, 'utf-8')
     const stored = JSON.parse(content)
 
-    const apiKey = stored?.llm?.api_key || stored?.asr?.dashscope_api_key
+    const apiKey = stored?.llm?.api_key?.trim()
     if (!apiKey) return null
 
     return {
@@ -82,236 +61,103 @@ export async function loadLLMConfig(dataDir?: string): Promise<LLMConfig | null>
   }
 }
 
-async function resolveConfig(deps?: DirectLLMDeps): Promise<LLMConfig | null> {
-  if (deps?.loadConfig) return deps.loadConfig()
-  return loadLLMConfig()
+async function requestLegacyCompletion(
+  config: LLMConfig,
+  input: MeetingModelRequest,
+  stream: boolean,
+  fetchImpl: typeof fetch,
+): Promise<Response> {
+  const timeout = AbortSignal.timeout(input.purpose === 'meeting-report' ? 180_000 : 30_000)
+  const response = await fetchImpl(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        { role: 'system', content: input.systemPrompt },
+        { role: 'user', content: input.userPrompt },
+      ],
+      temperature: input.temperature,
+      max_tokens: input.maxTokens,
+      stream,
+    }),
+    signal: input.signal ? AbortSignal.any([input.signal, timeout]) : timeout,
+  })
+  if (!response.ok) {
+    await response.body?.cancel()
+    throw new Error(`Meeting model API error ${response.status}`)
+  }
+  return response
 }
 
-/**
- * Resolve a profile's default model + provider credentials (baseUrl + apiKey).
- *
- * Used as a fallback when `meeting-asr/config.json` has no `llm.api_key` but
- * the profile's `config.yaml` does have a usable provider. Returns null when
- * the profile doesn't expose a direct LLM endpoint (custom_providers entry
- * missing base_url / api_key / key_env), letting the caller decide whether
- * to fall through to the Hermes Agent bridge.
- */
-export async function resolveProfileLLMConfig(profile: string, requestedModel?: string): Promise<LLMConfig | null> {
-  if (!profile || !profile.trim()) return null
-  let config: any = null
-  try {
-    config = await readConfigYamlForProfile(profile)
-  } catch (err) {
-    logger.warn('[direct-llm] failed to read profile config for %s: %s', profile, (err as Error)?.message || err)
-    return null
-  }
-  if (!config || typeof config !== 'object') return null
-
-  // 1. Resolve the model name: explicit request → profile default.
-  const modelSection = config.model
-  const defaultModel = typeof modelSection === 'string'
-    ? modelSection.trim()
-    : String(modelSection?.default || '').trim()
-  const model = (requestedModel && requestedModel.trim()) || defaultModel
-  if (!model) return null
-
-  // 2. Resolve the provider name from model.provider if set.
-  const modelProviderName = typeof modelSection === 'object'
-    ? String(modelSection?.provider || '').trim()
-    : ''
-
-  // 3a. Custom providers in config.yaml take precedence (the user may have
-  //     intentionally shadowed a built-in name like `anthropic` with their own
-  //     baseUrl + apiKey).
-  const providers = getCompatibleCustomProviders(config)
-  const provider = pickProvider(providers, modelProviderName, model)
-  if (provider) {
-    let apiKey = (provider.api_key || '').trim()
-    if (!apiKey && provider.key_env) {
-      apiKey = await readEnvVarForProfile(profile, provider.key_env)
-    }
-    if (!apiKey) {
-      logger.warn('[direct-llm] profile %s provider %s has no api_key / key_env', profile, provider.name)
-      return null
-    }
-    return {
-      apiKey,
-      baseUrl: provider.base_url.replace(/\/+$/, ''),
-      model,
-    }
-  }
-
-  // 3b. Built-in provider (minimax-cn, deepseek, alibaba, …): credentials live
-  //     in `~/.hermes/profiles/<name>/.env` keyed by `api_key_env` /
-  //     `base_url_env` in `PROVIDER_ENV_MAP`. Use the preset base URL when env
-  //     doesn't set one. Only used when the profile doesn't already override
-  //     the provider with a custom_providers entry.
-  if (modelProviderName) {
-    const builtin = await resolveBuiltinProviderConfig(profile, modelProviderName)
-    if (builtin) return { apiKey: builtin.apiKey, baseUrl: builtin.baseUrl, model }
-  }
-
-  logger.warn('[direct-llm] profile %s has no provider matching name=%s model=%s; %d custom_providers available', profile, modelProviderName || '(none)', model, providers.length)
-  return null
+interface LegacyModelResponse {
+  choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
+  error?: string | { message?: string }
 }
 
-/**
- * Resolve credentials for a built-in provider (e.g. minimax-cn, deepseek,
- * alibaba). Reads `api_key_env` from the profile's `.env`, falls back to
- * `process.env`. Base URL comes from `base_url_env` if set, otherwise from
- * the built-in preset catalog.
- *
- * Returns null when the provider is not a known built-in or has no usable key
- * — letting the caller fall through to bridge / custom_providers.
- */
-async function resolveBuiltinProviderConfig(profile: string, providerName: string): Promise<{ apiKey: string; baseUrl: string } | null> {
-  const envMap = PROVIDER_ENV_MAP[providerName]
-  if (!envMap) {
-    logger.warn('[direct-llm] builtin lookup for %s: PROVIDER_ENV_MAP has no entry', providerName)
-    return null
+function legacyModelContent(payload: LegacyModelResponse): string | undefined {
+  if (payload.error) {
+    throw new Error(typeof payload.error === 'string' ? payload.error : payload.error.message || 'Meeting model stream failed')
   }
-  const apiKeyEnv = envMap.api_key_env
-  const baseUrlEnv = envMap.base_url_env
-  if (!apiKeyEnv && !baseUrlEnv) return null  // OAuth-only providers (e.g. minimax-oauth) — no direct path
-
-  // Ensure catalog is loaded once before the api_mode / baseUrl lookups.
-  await loadBuiltinProviderCatalog()
-
-  // Direct path uses /chat/completions. Built-in providers with a different
-  // API mode (e.g. anthropic_messages for minimax-cn) would 404 here, so
-  // let the caller fall through to the Hermes Agent bridge.
-  if (!isBuiltinProviderChatCompletions(providerName)) {
-    logger.warn('[direct-llm] builtin %s is not chat_completions (anthropic_messages); deferring to bridge', providerName)
-    return null
-  }
-
-  let apiKey = apiKeyEnv ? await readEnvVarForProfile(profile, apiKeyEnv) : ''
-  if (!apiKey && apiKeyEnv && process.env[apiKeyEnv]) apiKey = process.env[apiKeyEnv] || ''
-  if (!apiKey) {
-    logger.warn('[direct-llm] builtin %s: no api_key found in profile .env or process.env', providerName)
-    return null
-  }
-
-  let baseUrl = baseUrlEnv ? await readEnvVarForProfile(profile, baseUrlEnv) : ''
-  if (!baseUrl && baseUrlEnv && process.env[baseUrlEnv]) baseUrl = process.env[baseUrlEnv] || ''
-  if (!baseUrl) baseUrl = builtinProviderBaseUrl(providerName)
-  if (!baseUrl) {
-    logger.warn('[direct-llm] builtin %s: no base_url (env=%s, preset=%s)', providerName, baseUrlEnv || '(none)', builtinProviderBaseUrl(providerName) || '(none)')
-    return null
-  }
-
-  return { apiKey: apiKey.trim(), baseUrl: baseUrl.replace(/\/+$/, '') }
+  return payload.choices?.[0]?.delta?.content ?? payload.choices?.[0]?.message?.content
 }
 
-let builtinApiModeCache: Map<string, string> | null = null
-let builtinBaseUrlCache: Map<string, string> | null = null
-let builtinCatalogPromise: Promise<void> | null = null
-
-async function loadBuiltinProviderCatalog(): Promise<void> {
-  if (builtinApiModeCache && builtinBaseUrlCache) return
-  try {
-    const mod = await import('../../contracts/providers') as { PROVIDER_PRESETS?: Array<{ value: string; base_url?: string; builtin?: boolean; api_mode?: string }> }
-    builtinApiModeCache = new Map()
-    builtinBaseUrlCache = new Map()
-    for (const p of mod.PROVIDER_PRESETS || []) {
-      if (p.builtin && p.value) {
-        builtinApiModeCache.set(p.value, p.api_mode || 'chat_completions')
-        if (p.base_url) builtinBaseUrlCache.set(p.value, p.base_url)
+async function* streamLegacyModel(config: LLMConfig, input: MeetingModelRequest, fetchImpl: typeof fetch): AsyncGenerator<string> {
+  if (input.purpose === 'meeting-report') {
+    const response = await requestLegacyCompletion(config, input, true, fetchImpl)
+    if (!response.body) throw new Error('Meeting model returned no response body')
+    let yieldedText = false
+    for await (const frame of readSseFrames(response.body)) {
+      if (frame.data === '[DONE]') break
+      let payload: LegacyModelResponse
+      try {
+        payload = JSON.parse(frame.data)
+      } catch {
+        continue
+      }
+      const text = legacyModelContent(payload)
+      if (text) {
+        yieldedText = true
+        yield text
       }
     }
-  } catch (err) {
-    logger.warn('[direct-llm] failed to load builtin provider presets: %s', (err as Error)?.message || err)
+    if (yieldedText) return
   }
+  const response = await requestLegacyCompletion(config, input, false, fetchImpl)
+  const text = legacyModelContent(await response.json() as LegacyModelResponse)
+  if (text) yield text
 }
 
-/** Test-only: clear the cached builtin catalog so subsequent calls re-read PROVIDER_PRESETS. */
-export function _resetBuiltinProviderCatalogForTests(): void {
-  builtinApiModeCache = null
-  builtinBaseUrlCache = null
-  builtinCatalogPromise = null
+async function resolveMeetingModel(input: MeetingModelRequest, deps?: DirectLLMDeps): Promise<AsyncIterable<string> | null> {
+  input.signal?.throwIfAborted()
+  const configured = await streamConfiguredMeetingModel(input)
+  if (configured) return configured
+  if (input.provider || input.model) throw new Error('Meeting model is unavailable in this profile')
+  if (input.profile !== 'default') return null
+  const legacy = await (deps?.loadConfig ? deps.loadConfig() : loadLegacyLLMConfig())
+  return legacy ? streamLegacyModel(legacy, input, deps?.fetchImpl ?? fetch) : null
 }
 
-function isBuiltinProviderChatCompletions(providerName: string): boolean {
-  // Providers without an entry default to chat_completions (legacy behaviour).
-  if (!builtinApiModeCache) return true
-  return (builtinApiModeCache.get(providerName) || 'chat_completions') === 'chat_completions'
+async function completeMeetingModel(input: MeetingModelRequest, deps?: DirectLLMDeps): Promise<string> {
+  const stream = await resolveMeetingModel(input, deps)
+  if (!stream) throw new Error('Configure a text model in Model Configuration for this profile')
+  let output = ''
+  for await (const text of stream) output += text
+  return output
 }
 
-function builtinProviderBaseUrl(providerName: string): string {
-  return builtinBaseUrlCache?.get(providerName) || ''
-}
-
-function pickProvider(
-  providers: NormalizedCustomProvider[],
-  preferredName: string,
-  model: string,
-): NormalizedCustomProvider | null {
-  if (!providers.length) return null
-  const want = preferredName.toLowerCase()
-  // 1. Explicit match by name / provider_key.
-  if (want) {
-    const match = providers.find(p => (p.name || '').toLowerCase() === want || (p.provider_key || '').toLowerCase() === want)
-    if (match) return match
-  }
-  // 2. Provider whose `model` matches the requested model id exactly.
-  if (model) {
-    const match = providers.find(p => (p.model || '').trim() === model)
-    if (match) return match
-  }
-  // 3. No match — don't fall through to an unrelated provider (its baseUrl /
-  //    api_key would be wrong). Caller will fall back to the bridge path.
-  return null
-}
-
-/**
- * Look up an env var in the profile's `.env` file (KEY=VALUE per line). The
- * file is the same one Hermes Agent reads; values may be quoted or unquoted.
- */
-async function readEnvVarForProfile(profile: string, key: string): Promise<string> {
-  if (!key) return ''
-  const envPath = path.join(getProfileDir(profile), '.env')
-  try {
-    const text = await fs.readFile(envPath, 'utf-8')
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim()
-      if (!line || line.startsWith('#')) continue
-      const m = line.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/)
-      if (!m || m[1] !== key) continue
-        const raw = m[2]
-        // Strip wrapping quotes.
-        const stripped = raw.replace(/^["'](.*)["']$/, '$1').trim()
-        if (stripped) return stripped
-    }
-  } catch (err) {
-    const code = (err as { code?: string })?.code
-    if (code !== 'ENOENT') {
-      logger.warn('[direct-llm] failed to read %s: %s', envPath, (err as Error)?.message || err)
-    }
-  }
-  return ''
-}
-
-/**
- * 回退路径：直接调用 LLM API 进行实时分析（不经过 Agent）。
- */
-export async function analyzeViaDirectLLM(
+export async function analyzeMeetingBatch(
   transcriptText: string,
   template: SceneTemplate,
-  profile: string,
+  target: MeetingModelTarget,
   speechContext?: SpeechContext | null,
   speechSummary?: SpeechSummary,
-  deps?: DirectLLMDeps,
+  signal?: AbortSignal,
 ): Promise<AnalysisRound | null> {
-  const config = await resolveConfig(deps)
-  if (!config) {
-    logger.warn('[meeting-assist] LLM config not available, skipping analysis')
-    return null
-  }
-
   // 动态加载 profile 下的会议分析技能并追加到 system prompt。
   // 演讲评分场景使用自成一体的专业提示词（3+1 反馈 / 金句定义 / 赘语阈值 / 说人话鼓励式点评等），
   // 不追加通用会议分析技能，避免其通用方法论稀释演讲点评风格。
-  const skillSection = template.id === 'speech' ? '' : await prepareAnalysisSkillSection(profile, template.id)
+  const skillSection = template.id === 'speech' ? '' : await prepareAnalysisSkillSection(target.profile, template.id)
   let systemPrompt = skillSection
     ? `${template.systemPrompt}\n\n${skillSection}`
     : template.systemPrompt
@@ -376,34 +222,15 @@ export async function analyzeViaDirectLLM(
     systemPrompt = `${systemPrompt}\n${lines.join('\n')}`
   }
 
-  const body = {
-    model: config.model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `以下是最近的对话内容：\n\n${transcriptText}` },
-    ],
+  const content = await completeMeetingModel({
+    ...target,
+    purpose: 'meeting-analysis',
+    systemPrompt,
+    userPrompt: `以下是最近的对话内容：\n\n${transcriptText}`,
     temperature: 0.3,
-    // 演讲评分场景需要输出评分表/赘语/语法等多字段 JSON，给更大输出空间。
-    max_tokens: template.id === 'speech' ? 1200 : 800,
-  }
-
-  const doFetch = deps?.fetchImpl ?? fetch
-  const response = await doFetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(body),
+    maxTokens: template.id === 'speech' ? 1200 : 800,
+    signal,
   })
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new Error(`LLM API error ${response.status}: ${text.slice(0, 200)}`)
-  }
-
-  const data = await response.json() as any
-  const content = data?.choices?.[0]?.message?.content || '{}'
 
   // H1 赘语阈值：实际发言时长 = 设置时长 - 当前倒计时（缺省不启用阈值过滤）
   let speechDurationSec: number | undefined
@@ -418,149 +245,24 @@ export async function analyzeViaDirectLLM(
   return parseAnalysisRound(content, { speechDurationSec })
 }
 
-/**
- * 回退路径：直接调用 LLM API 生成报告（不经过 Hermes Agent）。
- * 保留 profile 下会议分析技能的动态注入。
- */
-export async function* streamDirectLLMReport(
+export async function* streamMeetingModelReport(
   transcript: string,
   template: SceneTemplate,
-  profile: string,
-  deps?: DirectLLMDeps,
+  target: MeetingModelTarget,
+  signal?: AbortSignal,
 ): AsyncGenerator<string> {
-  const config = await resolveConfig(deps)
-  if (!config) throw new Error('LLM config not available')
-
-  // 动态加载 profile 下的会议分析技能并追加到报告 system prompt。
-  // 演讲评分场景不追加通用会议分析技能：报告要求是公众号风格、不是正式文档，
-  // 通用技能的会议纪要式结构会稀释该风格（见 analyzeViaDirectLLM 同款注释）。
-  const skillSection = template.id === 'speech' ? '' : await prepareAnalysisSkillSection(profile, template.id)
-  const reportPrompt = skillSection
-    ? `${template.reportPrompt}\n\n${skillSection}\n\n${REPORT_TITLE_INSTRUCTION}`
-    : `${template.reportPrompt}\n\n${REPORT_TITLE_INSTRUCTION}`
-
-  const body = {
-    model: config.model,
-    messages: [
-      { role: 'system', content: reportPrompt },
-      { role: 'user', content: `以下是完整的会议转写内容：\n\n${transcript}` },
-    ],
+  const skillSection = template.id === 'speech' ? '' : await prepareAnalysisSkillSection(target.profile, template.id)
+  const stream = await resolveMeetingModel({
+    ...target,
+    purpose: 'meeting-report',
+    systemPrompt: [template.reportPrompt, skillSection, REPORT_TITLE_INSTRUCTION].filter(Boolean).join('\n\n'),
+    userPrompt: `以下是完整的会议转写内容：\n\n${transcript}`,
     temperature: 0.4,
-    max_tokens: 4000,
-    stream: true,
-  }
-
-  const doFetch = deps?.fetchImpl ?? fetch
-  const response = await doFetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(body),
+    maxTokens: 4000,
+    signal,
   })
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new Error(`LLM API error ${response.status}: ${text.slice(0, 200)}`)
-  }
-
-  const reader = response.body?.getReader()
-  if (!reader) throw new Error('No response body')
-
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let yieldedAny = false
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) {
-      // 流结束时把 buffer 里剩余的最后一行（可能是不带换行的最后一条 data:）flush 出去。
-      // 否则最后一段 chunk 会留在 buffer 里永远不到前端。
-      if (buffer.trim()) {
-        const trimmed = buffer.trim()
-        if (trimmed.startsWith('data:')) {
-          const payload = trimmed.slice(5).trim()
-          if (payload && payload !== '[DONE]') {
-            try {
-              const chunk = JSON.parse(payload)
-              // provider 也可能把错误放在流里（{error: {...}}），这种帧必须立即抛错
-              // 让外层 fallback / 上层 catch 处理，否则会被静默忽略。
-              if (chunk?.error) {
-                throw new Error(typeof chunk.error === 'string' ? chunk.error : (chunk.error?.message || JSON.stringify(chunk.error)))
-              }
-              const delta = chunk?.choices?.[0]?.delta?.content ?? chunk?.choices?.[0]?.message?.content
-              if (delta) {
-                yieldedAny = true
-                yield delta
-              }
-            } catch (err) {
-              if (err instanceof SyntaxError) {
-                console.warn('[report-stream] 无法解析的 SSE 块:', payload.slice(0, 200))
-              } else {
-                throw err
-              }
-            }
-          }
-        }
-      }
-      break
-    }
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      // 兼容 "data: {...}" 和 "data:{...}" 两种格式
-      if (!trimmed.startsWith('data:')) continue
-      const payload = trimmed.slice(5).trim()
-      if (!payload || payload === '[DONE]') continue
-
-      try {
-        const chunk = JSON.parse(payload)
-        // provider 也可能把错误放在流里（{error: {...}}），这种帧必须立即抛错
-        // 让外层 fallback / 上层 catch 处理，否则会被静默忽略。
-        if (chunk?.error) {
-          throw new Error(typeof chunk.error === 'string' ? chunk.error : (chunk.error?.message || JSON.stringify(chunk.error)))
-        }
-        // 标准 OpenAI 流式：delta.content；部分端点：message.content
-        const delta = chunk?.choices?.[0]?.delta?.content ?? chunk?.choices?.[0]?.message?.content
-        if (delta) {
-          yieldedAny = true
-          yield delta
-        }
-      } catch (err) {
-        if (err instanceof SyntaxError) {
-          console.warn('[report-stream] 无法解析的 SSE 块:', payload.slice(0, 200))
-        } else {
-          throw err
-        }
-      }
-    }
-  }
-
-  // 流式未产出任何内容时，回退到非流式调用（与分析接口相同的可靠路径）
-  if (!yieldedAny) {
-    console.warn('[report-stream] 流式响应为空，回退到非流式调用')
-    const fallbackBody = { ...body, stream: false }
-    const fallbackRes = await doFetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(fallbackBody),
-    })
-    if (!fallbackRes.ok) {
-      const text = await fallbackRes.text().catch(() => '')
-      throw new Error(`LLM API error ${fallbackRes.status}: ${text.slice(0, 200)}`)
-    }
-    const data = await fallbackRes.json() as any
-    const content = data?.choices?.[0]?.message?.content
-    if (content) yield content
-  }
+  if (!stream) throw new Error('Configure a text model in Model Configuration for this profile')
+  yield* stream
 }
 
 /**
@@ -581,20 +283,13 @@ export function cleanMeetingTitle(raw: unknown): string | null {
   return cleaned.length > 40 ? cleaned.slice(0, 40) : cleaned
 }
 
-/**
- * 为一场会议生成一个简短标题（首次 AI 分析完成时，基于当前已有转写轻量取名）。
- * 直调 OpenAI 兼容端点（与分析/报告同款配置：meeting-asr 数据目录 config.json）。
- * 任一步失败都静默返回 null（不影响主流程），由后续最终报告标题兜底。
- */
 export async function generateMeetingTitle(
   transcript: string,
+  target: MeetingModelTarget,
   deps?: DirectLLMDeps,
 ): Promise<string | null> {
   const text = (transcript || '').trim()
   if (!text) return null
-  const config = await resolveConfig(deps)
-  if (!config) return null
-
   // 控制请求体大小：转写过长时只取开头与结尾，中间省略。
   const MAX = 6000
   const excerpt = text.length > MAX
@@ -609,32 +304,15 @@ export async function generateMeetingTitle(
     '3. 标题应具体（如“Q3 供应商合同条款评审”），不要用“会议纪要/会议记录/会议总结/会议分析”这类泛化词。',
   ].join('\n')
 
-  const doFetch = deps?.fetchImpl ?? fetch
   try {
-    const response = await doFetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: `会议转写内容：\n\n${excerpt}` },
-        ],
-        temperature: 0.3,
-        max_tokens: 64,
-      }),
-    })
-    if (!response.ok) {
-      const body = await response.text().catch(() => '')
-      logger.warn('[meeting-assist] title LLM request failed: %s %s', response.status, body.slice(0, 200))
-      return null
-    }
-    const data = await response.json() as any
-    const content = data?.choices?.[0]?.message?.content
-    return cleanMeetingTitle(content)
+    return cleanMeetingTitle(await completeMeetingModel({
+      ...target,
+      purpose: 'meeting-title',
+      systemPrompt: system,
+      userPrompt: `会议转写内容：\n\n${excerpt}`,
+      temperature: 0.3,
+      maxTokens: 64,
+    }, deps))
   } catch (err) {
     logger.warn('[meeting-assist] title generation failed: %s', err instanceof Error ? err.message : String(err))
     return null

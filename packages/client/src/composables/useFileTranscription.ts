@@ -60,7 +60,7 @@ export function useFileTranscription(deps: UseFileTranscriptionDeps) {
     return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
-  async function pollUntilDone(jobId: string): Promise<FileTranscriptionJob> {
+  async function pollUntilDone(jobId: string, profile?: string): Promise<FileTranscriptionJob> {
     const deadline = Date.now() + MAX_POLL_MS
     let transientSince: number | null = null
 
@@ -69,7 +69,7 @@ export function useFileTranscription(deps: UseFileTranscriptionDeps) {
 
       let job: FileTranscriptionJob
       try {
-        job = await meetingASRApi.getFileTranscriptionStatus(jobId)
+        job = await meetingASRApi.getFileTranscriptionStatus(jobId, profile)
         transientSince = null
       } catch (err) {
         const status = err instanceof MeetingASRHttpError ? err.status : 0
@@ -110,7 +110,8 @@ export function useFileTranscription(deps: UseFileTranscriptionDeps) {
     try {
       const started = await meetingASRApi.startFileTranscription(file, options)
       phase.value = 'transcribing'
-      const job = await pollUntilDone(started.job_id)
+      const job = await pollUntilDone(started.job_id, options.profile)
+      if (cancelled) return false
       if (!job.result) throw new Error('transcription returned no result')
       progress.value = 1
       await deps.onComplete(job.result, options)

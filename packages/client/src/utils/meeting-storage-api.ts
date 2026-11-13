@@ -1,4 +1,5 @@
 import { getApiKey, getBaseUrl, getActiveProfileName } from '@/api/client'
+import type { AgentConfig, AnalysisRoundRecord, MeetingSession } from '@/stores/hermes/meeting'
 
 const API_BASE = '/api/studio/meeting-storage'
 
@@ -27,10 +28,13 @@ export interface MeetingData {
   speakerMap: Record<string, string>
   speakers: any[]
   status: 'idle' | 'recording' | 'paused' | 'completed'
-  analysisMode: 'hermes' | 'custom'
+  analysisMode: MeetingSession['analysisMode']
   hermesProfile?: string
   customProvider?: string
   customModel?: string
+  agentConfig?: AgentConfig
+  sceneTemplate?: string
+  analysisRounds?: AnalysisRoundRecord[]
   audioDuration: number
 }
 
@@ -49,11 +53,12 @@ export const meetingStorageApi = {
   },
 
   async saveMeeting(meetingId: string, data: MeetingData): Promise<void> {
-    await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}`, {
+    const response = await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}`, {
       method: 'PUT',
       headers: getAuthHeaders(),
       body: JSON.stringify(data),
     })
+    if (!response.ok) throw new Error(`Meeting save failed (${response.status})`)
   },
 
   async deleteMeeting(meetingId: string): Promise<void> {
@@ -91,11 +96,12 @@ export const meetingStorageApi = {
     const headers = getAuthHeaders()
     delete headers['Content-Type'] // Let browser set it with boundary
     
-    await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}/audio`, {
+    const response = await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}/audio`, {
       method: 'POST',
       headers,
       body: audioBlob,
     })
+    if (!response.ok) throw new Error(`Meeting audio upload failed (${response.status})`)
   },
 
   async downloadAudio(meetingId: string): Promise<Blob | null> {
@@ -112,11 +118,12 @@ export const meetingStorageApi = {
 
   // Transcript
   async saveTranscript(meetingId: string, sentences: any[]): Promise<void> {
-    await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}/transcript`, {
+    const response = await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}/transcript`, {
       method: 'PUT',
       headers: getAuthHeaders(),
       body: JSON.stringify(sentences),
     })
+    if (!response.ok) throw new Error(`Meeting transcript save failed (${response.status})`)
   },
 
   async getTranscript(meetingId: string): Promise<any[]> {

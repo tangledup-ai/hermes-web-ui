@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, watch, onMounted, onUnmounted, computed, nextTick, defineAsyncComponent } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton, NSpin, NTag, NTooltip, NInput, NPopconfirm, NModal, NSelect, NRadio, NRadioGroup, NTabs, NTabPane } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { NAlert, NButton, NSpin, NTag, NTooltip, NInput, NPopconfirm, NSelect, NTabs, NTabPane } from 'naive-ui'
 import MeetingAgentPanel from '@/components/hermes/meeting/MeetingAgentPanel.vue'
 import SceneTemplatePicker from '@/components/hermes/meeting/SceneTemplatePicker.vue'
 import WaveformCanvas from '@/components/hermes/meeting/WaveformCanvas.vue'
 import MeetingSidebar, { type SidebarSession } from '@/components/hermes/meeting/MeetingSidebar.vue'
 import CreateMeetingDialog from '@/components/hermes/meeting/CreateMeetingDialog.vue'
-import AsrConfigWizardDialog from '@/components/hermes/meeting/AsrConfigWizardDialog.vue'
 import DirectTranscribeForm from '@/components/hermes/meeting/DirectTranscribeForm.vue'
-import DiarizeWholeFileDialog, { type DiarizeEngine, type DiarizeOssConfig } from '@/components/hermes/meeting/DiarizeWholeFileDialog.vue'
+import DiarizeWholeFileDialog, { type DiarizeEngine } from '@/components/hermes/meeting/DiarizeWholeFileDialog.vue'
 import { SCENE_UI } from '@/components/hermes/meeting/scene-ui-registry'
 import { normalizeSceneId } from '@/components/hermes/meeting/scene-templates'
 import MeetingTopBar from '@/components/hermes/meeting/MeetingTopBar.vue'
@@ -18,12 +18,13 @@ import TranscriptList from '@/components/hermes/meeting/TranscriptList.vue'
 import type { SceneId } from '@/components/hermes/meeting/scene-templates'
 import { useMeetingStore } from '@/stores/hermes/meeting'
 import type { MeetingSession, TranscriptSentence, AgentConfig, SpeechEvalState } from '@/stores/hermes/meeting'
-import { useModelsStore } from '@/stores/hermes/models'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { DEFAULT_EVAL, provideSpeechTimer } from '@/components/hermes/meeting/speech/speechTimerContext'
-import { useRealtimeModelStore } from '@/stores/hermes/realtime-model'
+import type { MeetingTranscriptionSetting } from '@/api/studio/meeting-transcription'
+import { loadMeetingTranscriptionSetting } from '@/utils/meeting-transcription-settings'
+import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import { meetingASRApi } from '@/utils/meeting-asr-api'
-import { getApiKey } from '@/api/client'
+import { request } from '@/api/client'
 import { useMessage } from '@/composables/useAppMessage'
 import { meetingStorageApi } from '@/utils/meeting-storage-api'
 import { extractMeetingTitleFromReport, requestAiMeetingTitle, formatTranscriptForTitle, canAutoRenameMeeting } from '@/utils/meeting-title'
@@ -35,12 +36,12 @@ import { useMeetingDownloads } from '@/composables/useMeetingDownloads'
 import { useFileTranscription } from '@/composables/useFileTranscription'
 import { buildSegmentRanges, resolveActiveSegmentSpeaker } from '@/utils/speech-segments'
 
+const MarkdownRenderer = defineAsyncComponent(() => import('@/components/hermes/chat/MarkdownRenderer.vue'))
 const { t } = useI18n()
 const message = useMessage()
 const meetingStore = useMeetingStore()
-const modelsStore = useModelsStore()
 const profilesStore = useProfilesStore()
-const realtimeModelStore = useRealtimeModelStore()
+const router = useRouter()
 
 // --- 侧边栏状态 ---
 const showSidebar = ref(true)
@@ -52,52 +53,51 @@ const sidebarSessions = computed<SidebarSession[]>(() =>
     title: s.title,
     updatedAt: s.updatedAt,
     sentencesCount: s.sentences.length,
-    hasAnalysis: s.analysisResult !== null && s.analysisResult !== undefined,
+    hasAnalysis: Boolean(s.analysisResult || s.htmlContent),
   })),
 )
 
 // --- 创建会议对话框 ---
 const showCreateModal = ref(false)
 const newMeetingTitle = ref('')
-const newMeetingAnalysisMode = ref<'hermes' | 'custom'>('hermes')
-const newMeetingHermesProfile = ref('')
-const newMeetingCustomProvider = ref('')
-const newMeetingCustomModel = ref('')
+const newMeetingAgentType = ref<'ekko' | 'hermes'>('ekko')
+const newMeetingAgentProfile = ref('')
 const newMeetingSceneTemplate = ref<SceneId>('general')
+const agentTypeOptions = [
+  { label: 'Ekko Agent', value: 'ekko' },
+  { label: 'Hermes Agent', value: 'hermes' },
+]
 
-// --- Agent 配置 ---
-const newMeetingAgentType = ref<'hermes' | 'claude-code' | 'codex'>('hermes')
-const newMeetingCodingAgentMode = ref<'scoped' | 'global'>('scoped')
+const activeProfile = computed(() => profilesStore.activeProfileName || 'default')
+const transcriptionSetting = ref<MeetingTranscriptionSetting | null>(null)
+const transcriptionSettingError = ref(false)
+let transcriptionLoadId = 0
+let transcriptionLoad: Promise<void> = Promise.resolve()
 
-// Agent 类型选项
-const agentTypeOptions = computed(() => [
-  { label: 'Hermes Agent', value: 'hermes', description: t('meeting.agentTypeHermesDesc') },
-  { label: 'Claude Code', value: 'claude-code', description: t('meeting.agentTypeClaudeCodeDesc') },
-  { label: 'Codex', value: 'codex', description: t('meeting.agentTypeCodexDesc') },
-])
+function refreshTranscriptionSetting(profile: string) {
+  const loadId = ++transcriptionLoadId
+  transcriptionSetting.value = null
+  transcriptionSettingError.value = false
+  transcriptionLoad = loadMeetingTranscriptionSetting(profile, activeProfile.value).then((setting) => {
+    if (loadId === transcriptionLoadId) transcriptionSetting.value = setting
+  }).catch((error) => {
+    if (loadId !== transcriptionLoadId) return
+    transcriptionSettingError.value = true
+    console.error('[meeting] failed to load transcription settings:', error)
+  })
+  return transcriptionLoad
+}
 
-// Coding Agent 模式选项
-const codingAgentModeOptions = computed(() => [
-  { label: t('meeting.codingAgentModeScoped'), value: 'scoped', description: t('meeting.codingAgentModeScopedDesc') },
-  { label: t('meeting.codingAgentModeGlobal'), value: 'global', description: t('meeting.codingAgentModeGlobalDesc') },
-])
+watch(activeProfile, profile => void refreshTranscriptionSetting(profile), { immediate: true })
 
-// --- ASR 配置 ---
-// DashScope Key 由父级持有（"创建"按钮禁用条件需要响应式依赖它）；
-// 其余向导字段（LLM/OSS/步骤/ASR 模型/ASR provider）由 AsrConfigWizardDialog
-// 自持，通过 collectConfig() 取值、reset() 重播种。
-// 未单独配置时默认回落 Realtime 模型面板里统一管理的千问 API Key。
-const asrApiKey = ref(meetingStore.asrConfig.dashscopeApiKey || realtimeModelStore.config.apiKey)
-const newMeetingAsrProvider = ref<'dashscope' | 'minimax'>(
-  realtimeModelStore.config.asrProvider || meetingStore.asrConfig.asrProvider || 'dashscope',
-)
-const newMeetingMinimaxApiKey = ref(
-  meetingStore.asrConfig.minimaxApiKey || realtimeModelStore.config.minimaxApiKey,
-)
-const asrWizardRef = ref<InstanceType<typeof AsrConfigWizardDialog> | null>(null)
+function openTranscriptionSettings() {
+  void router.push({
+    name: 'hermes.models',
+    query: { tab: 'stt', modelProfile: activeProfile.value },
+  })
+}
 
 // --- 当前会议状态 ---
-const isLoading = ref(false)
 const partialText = ref('')
 const finalSentences = ref<TranscriptSentence[]>([])
 const speakerMap = ref<Record<string, string>>({})
@@ -144,16 +144,12 @@ const asrServiceError = ref('')
 // --- 分析相关 ---
 const analysisResult = ref<any>(null)
 const htmlContent = ref('')
-const isAnalyzing = ref(false)
-const analysisInterval = ref(30)
-const analysisTriggerMode = ref<'sentences' | 'time' | 'both'>('sentences')
-const analysisIntervalSentences = ref(10)
-const agentStartAnalysisTrigger = ref(0)
+const isHtmlReport = computed(() => /^\s*(<!doctype\b|<html[\s>])/i.test(htmlContent.value))
 const showReport = ref(false)
-const showAnalysisConfig = ref(false)
 
 // --- Agent 分析相关 ---
-const showAgentPanel = ref(false)
+const showAgentPanel = ref(true)
+const pendingMeetingWrites = new Map<string, Promise<void>>()
 const assistPanelRef = ref<InstanceType<typeof MeetingAgentPanel> | null>(null)
 
 // --- 新建会议：采集方式选项卡（实时语音 / 直接音频转录） ---
@@ -195,7 +191,8 @@ const {
   asrServiceStatus,
   asrServiceError,
   openCreateModal,
-  startASRService,
+  getTranscriptionProfile: () => activeProfile.value,
+  startASRService: startRealtimeTranscription,
   handleWsMessage,
   saveCurrentMeeting,
   assistPanelRef,
@@ -221,15 +218,19 @@ const { downloadAudio, downloadTranscript, downloadTranscriptMarkdown, downloadJ
 const lastTranscribeWasDiarize = ref(true)
 const { isTranscribing, progress: transcribeProgress, transcribe } = useFileTranscription({
   onComplete: async (result, options) => {
-    const changed = applyFileTranscriptionResult(result.sentences, { diarize: !!options.diarize })
-    const sessionId = meetingStore.activeSessionId
-    if (sessionId) {
-      meetingStore.updateSession(sessionId, {
-        sentences: [...finalSentences.value],
-        speakerMap: { ...speakerMap.value },
-      })
+    const session = meetingStore.sessions.find(item => item.id === options.sessionId)
+    if (!session) return
+    const { changed, ...updated } = applyFileTranscriptionResult(session, result.sentences, !!options.diarize)
+    meetingStore.updateSession(session.id, {
+      ...updated,
+      audioDuration: result.duration_sec || session.audioDuration,
+      status: 'completed',
+    })
+    if (meetingStore.activeSessionId === session.id) {
+      finalSentences.value = [...updated.sentences]
+      speakerMap.value = { ...updated.speakerMap }
     }
-    await saveCurrentMeeting()
+    await persistMeeting(session.id)
     if (changed > 0) {
       message.success(t(options.diarize ? 'meeting.diarizeDone' : 'meeting.directTranscribeDone'))
     } else {
@@ -256,88 +257,41 @@ const { isTranscribing, progress: transcribeProgress, transcribe } = useFileTran
   },
 })
 
-/** 当前会议用哪个 ASR 引擎（会话优先，其次全局配置）。 */
-function activeTranscribeEngine(): 'minimax' | 'qwen' {
-  const provider = meetingStore.activeSession?.asrProvider
-    || meetingStore.asrConfig.asrProvider
-    || 'dashscope'
-  return provider === 'minimax' ? 'minimax' : 'qwen'
+const transcriptionProviderLabel = computed(() => t(
+  transcriptionSetting.value?.asrProvider === 'minimax'
+    ? 'meeting.asrProviderMinimax'
+    : 'meeting.asrProviderDashscope',
+))
+const transcriptionModel = computed(() => transcriptionSetting.value?.asrProvider === 'minimax'
+  ? transcriptionSetting.value.minimaxAsrModel
+  : transcriptionSetting.value?.paraformerModel,
+)
+const realtimeConfigured = computed(() => transcriptionSetting.value?.asrProvider === 'minimax'
+  ? transcriptionSetting.value.minimaxKeyConfigured
+  : transcriptionSetting.value?.dashscopeKeyConfigured,
+)
+const fileEngineConfigured = computed(() => directEngine.value === 'minimax'
+  ? transcriptionSetting.value?.minimaxKeyConfigured
+  : transcriptionSetting.value?.dashscopeKeyConfigured,
+)
+const captureConfigured = computed(() => newMeetingCaptureMode.value === 'file'
+  ? fileEngineConfigured.value
+  : realtimeConfigured.value,
+)
+const createMeetingDisabled = computed(() => !newMeetingTitle.value.trim() || !captureConfigured.value
+  || (newMeetingCaptureMode.value === 'file' && (!directFile.value || transcriptionBusy.value)),
+)
+
+function defaultFileEngine(): DiarizeEngine {
+  const config = transcriptionSetting.value
+  return config?.minimaxKeyConfigured && (config.asrProvider === 'minimax' || !config.dashscopeKeyConfigured)
+    ? 'minimax'
+    : 'qwen'
 }
 
-/**
- * 整段转录的后端能力版本（与 python-backend/app/main.py 的
- * `TRANSCRIBE_CAPABILITY` 保持一致）。改 `/api/transcribe` 契约时两边一起 +1。
- */
-const TRANSCRIBE_CAPABILITY = '2'
+const isPreparingTranscription = ref(false)
+const transcriptionBusy = computed(() => isPreparingTranscription.value || isTranscribing.value)
 
-/**
- * 确保整段转录的后端是「当前代码」。
- *
- * uvicorn 子进程在 spawn 时 import 一次模块，之后重建 dist / 刷新页面都不会
- * 让它重新加载 python-backend —— 这正是「已修复的 bug 仍然复现」的原因。
- * 这里探测 /healthz 的能力标记与代码 hash：
- *  - 都能对上 → 直接用；
- *  - 对不上（或探测失败）→ 主动 stop 一次，强制下次 start 重新 spawn。
- */
-async function ensureTranscribeBackend(): Promise<boolean> {
-  const status = await checkASRServiceStatus()
-  if (!status?.isRunning) return startASRService()
-
-  let stale = false
-  try {
-    const health = await meetingASRApi.healthCheck()
-    if (String(health.transcribe || '') !== TRANSCRIBE_CAPABILITY) {
-      stale = true
-    } else if (status.codeHash && health.code_hash !== status.codeHash) {
-      stale = true
-    }
-  } catch (err) {
-    console.warn('[meeting] ASR capability probe failed; restarting service', err)
-    stale = true
-  }
-
-  if (stale) {
-    console.warn('[meeting] ASR backend is running stale code; restarting to reload python-backend')
-    message.info(t('meeting.asrRestarting'))
-    try {
-      await meetingASRApi.stop()
-      await checkASRServiceStatus()
-    } catch (err) {
-      console.warn('[meeting] failed to stop stale ASR service:', err)
-    }
-  }
-  return startASRService()
-}
-
-/**
- * 把当前 ASR 凭据热推给已在运行的后端（不重启服务）。
- *
- * `startASRService()` 在「服务已运行且没有 OSS」时会直接返回、不下发配置；
- * 而整段转录允许临时切换引擎（会话 provider 与实际使用的 engine 可以不同），
- * 所以这里显式补一次凭据推送，避免后端缺少 MiniMax/DashScope key。
- */
-async function pushTranscribeCredentials() {
-  try {
-    await meetingASRApi.updateConfig({
-      dashscopeApiKey: meetingStore.asrConfig.dashscopeApiKey
-        || asrApiKey.value
-        || realtimeModelStore.config.apiKey,
-      minimaxApiKey: meetingStore.asrConfig.minimaxApiKey
-        || realtimeModelStore.config.minimaxApiKey,
-      minimaxAsrModel: meetingStore.asrConfig.minimaxAsrModel
-        || realtimeModelStore.config.minimaxAsrModel,
-      minimaxBaseUrl: meetingStore.asrConfig.minimaxBaseUrl
-        || realtimeModelStore.config.minimaxBaseUrl,
-    })
-  } catch (err) {
-    console.warn('[meeting] failed to push transcribe credentials:', err)
-  }
-}
-
-/**
- * 「拆分人声」：先让用户选识别模型（MiniMax / Qwen）与说话人数，
- * 再执行整段人声分离。Qwen 需要在对话框里补齐 OSS（公网音频 URL）。
- */
 function openDiarizeDialog() {
   if (!audioBlob.value || !meetingStore.activeSessionId) {
     message.warning(t('meeting.diarizeNoAudio'))
@@ -346,74 +300,49 @@ function openDiarizeDialog() {
   showDiarizeDialog.value = true
 }
 
-/** 对话框确认后：落库 OSS（若有改动）→ 确保 ASR 服务按新配置启动 → 开始整段分离。 */
-async function onDiarizeStart(payload: { engine: DiarizeEngine; speakerCount: number; oss: DiarizeOssConfig }) {
-  showDiarizeDialog.value = false
+async function transcribeMeetingFile(file: Blob, options: Parameters<typeof transcribe>[1]) {
+  if (transcriptionBusy.value) return
+  isPreparingTranscription.value = true
+  try {
+    if (await startASRService(options.profile)) await transcribe(file, options)
+  } finally {
+    isPreparingTranscription.value = false
+  }
+}
+
+function onDiarizeStart(payload: { engine: DiarizeEngine; speakerCount: number }) {
   const sessionId = meetingStore.activeSessionId
   if (!audioBlob.value || !sessionId) return
-
-  if (payload.engine === 'qwen') {
-    meetingStore.updateASRConfig({
-      ossBucket: payload.oss.bucket,
-      ossAccessKeyId: payload.oss.accessKeyId,
-      ossAccessKeySecret: payload.oss.accessKeySecret,
-      ossEndpoint: payload.oss.endpoint,
-      ossPathPrefix: payload.oss.pathPrefix,
-    })
-  }
-
-  // 文件转录走 Node → Python ASR 后端，服务必须先起来；带 OSS 配置启动会
-  // 触发后端重启以读取新的 OSS 凭据，代码版本不一致时也会自动重启。
-  if (!(await ensureTranscribeBackend())) return
-  await pushTranscribeCredentials()
+  showDiarizeDialog.value = false
   lastTranscribeWasDiarize.value = true
-  await transcribe(audioBlob.value, {
+  void transcribeMeetingFile(audioBlob.value, {
     engine: payload.engine,
     diarize: true,
-    speakerCount: payload.speakerCount || 0,
+    speakerCount: payload.speakerCount,
     sessionId,
+    profile: activeProfile.value,
   })
 }
 
-/**
- * 「直接音频转录」：新建会议时选中的整段音频立即开始识别，并把音频落库，
- * 让后续的播放 / 下载音频按钮对这类会议同样可用。
- */
-async function runDirectTranscription(sessionId: string, file: File) {
-  if (!(await ensureTranscribeBackend())) return
-  await pushTranscribeCredentials()
-  meetingStorageApi.uploadAudio(sessionId, file).catch((err) => {
+function runDirectTranscription(sessionId: string, file: File) {
+  void meetingStorageApi.uploadAudio(sessionId, file).catch((err) => {
     console.warn('[meeting] failed to persist uploaded audio:', err)
+    message.error(t('meeting.errorUploadAudioFailed'))
+  })
+  void meetingStore.saveAudioData(sessionId, file).catch((err) => {
+    console.warn('[meeting] failed to back up uploaded audio:', err)
   })
   audioBlob.value = file
   audioUrl.value = URL.createObjectURL(file)
   lastTranscribeWasDiarize.value = false
-  await transcribe(file, {
+  void transcribeMeetingFile(file, {
     engine: directEngine.value,
     diarize: directDiarize.value,
-    speakerCount: directSpeakerCount.value || 0,
+    speakerCount: directSpeakerCount.value,
     sessionId,
+    profile: activeProfile.value,
   })
 }
-
-/** 创建按钮禁用条件：实时语音看 ASR Key，直接音频转录看引擎 Key + 是否选了文件。 */
-const createMeetingDisabled = computed(() => {
-  if (!newMeetingTitle.value.trim()) return true
-  if (newMeetingCaptureMode.value === 'realtime') {
-    return newMeetingAsrProvider.value === 'dashscope'
-      ? (!asrApiKey.value.trim() && !meetingStore.hasASRConfig && !realtimeModelStore.hasApiKey)
-      : (!newMeetingMinimaxApiKey.value.trim() && !realtimeModelStore.config.minimaxApiKey)
-  }
-  if (!directFile.value) return true
-  if (directEngine.value === 'minimax') {
-    return !(
-      newMeetingMinimaxApiKey.value.trim()
-      || meetingStore.asrConfig.minimaxApiKey
-      || realtimeModelStore.config.minimaxApiKey
-    )
-  }
-  return !asrApiKey.value.trim() && !meetingStore.hasASRConfig && !realtimeModelStore.hasApiKey
-})
 
 /**
  * 顶栏「导出会议文字」：把当前会议的 ASR 逐字稿导出为排版美观的 Markdown
@@ -495,25 +424,18 @@ watch(() => activeSession.value?.id, (id) => {
 // 只覆盖“会议 + 时间”这类占位标题；用户手动命名的会议一律不被覆盖。
 const aiAutoNamedSessions = new Set<string>()
 
-function persistAiMeetingTitle(sessionId: string, title: string) {
-  const session = meetingStore.sessions.find(s => s.id === sessionId)
-  if (!session || !title) return
-  meetingStore.updateSession(sessionId, { title, titleAutoNamed: true })
-  // 同步到服务端（仅当该会议已在服务端落库，避免为纯本地会议创建空壳）
-  meetingStorageApi.updateMeetingTitle(sessionId, title).catch(() => {})
-}
-
 async function autoNameOnFirstAnalysis(sessionId: string) {
   const session = meetingStore.sessions.find(s => s.id === sessionId)
   if (!session) return
   if (!canAutoRenameMeeting(session)) return
   if (!session.sentences.length) return
-  const title = await requestAiMeetingTitle(formatTranscriptForTitle(session.sentences))
+  const title = await requestAiMeetingTitle(formatTranscriptForTitle(session.sentences), resolveMeetingAgent(session))
   if (!title) return
   // 等待网络期间用户可能切走/删除了该会议，回来时再校验一次
   const cur = meetingStore.sessions.find(s => s.id === sessionId)
-  if (!cur || !canAutoRenameMeeting(cur)) return
-  persistAiMeetingTitle(sessionId, title)
+  if (!cur || cur.htmlContent || !canAutoRenameMeeting(cur)) return
+  meetingStore.updateSession(sessionId, { title, titleAutoNamed: true })
+  void persistMeeting(sessionId)
 }
 
 // 首个实时分析轮次（analysisRounds 0 → >0）到达即触发初步命名；每个会议至多触发一次。
@@ -533,32 +455,15 @@ watch(
 function onReportGenerated(markdown: string) {
   const sessionId = meetingStore.activeSessionId
   if (!sessionId) return
+  htmlContent.value = markdown
   meetingStore.updateSession(sessionId, { htmlContent: markdown })
   // 最终 AI 分析完成：若标题仍是占位/此前由 AI 命名，则用报告标题定稿
   const session = meetingStore.sessions.find(s => s.id === sessionId)
   if (session && canAutoRenameMeeting(session)) {
     const title = extractMeetingTitleFromReport(markdown)
-    if (title) persistAiMeetingTitle(sessionId, title)
+    if (title) meetingStore.updateSession(sessionId, { title, titleAutoNamed: true })
   }
-}
-
-// 手动请求生成报告
-function onRequestReport() {
-  const session = meetingStore.activeSession
-  console.log('[report] onRequestReport:', {
-    hasSession: !!session,
-    sentencesCount: session?.sentences.length ?? 0,
-    hasPanelRef: !!assistPanelRef.value,
-  })
-  if (session && session.sentences.length > 0 && assistPanelRef.value) {
-    const transcript = session.sentences
-      .map(s => `${s.speaker ? `[${s.speaker}] ` : ''}${s.text}`)
-      .join('\n')
-    console.log('[report] calling generateReport, transcript length:', transcript.length)
-    assistPanelRef.value.generateReport(transcript)
-  } else {
-    console.warn('[report] guard failed, report not generated')
-  }
+  void persistMeeting(sessionId)
 }
 
 // --- 右侧面板 ---
@@ -579,153 +484,47 @@ const profileOptions = computed(() => {
   }))
 })
 
-const providerOptions = computed(() => {
-  return modelsStore.providers
-    .filter(g => g.models.length > 0)
-    .map(g => ({
-      label: g.label || g.provider,
-      value: g.provider,
-    }))
-})
-
-const modelOptions = computed(() => {
-  if (!newMeetingCustomProvider.value) return []
-  const group = modelsStore.providers.find(g => g.provider === newMeetingCustomProvider.value)
-  if (!group) return []
-  return group.models.map(m => ({
-    label: m,
-    value: m,
-  }))
-})
-
 // --- 会议管理 ---
 function openCreateModal() {
+  if (isConnecting.value || isRecording.value) return
   newMeetingTitle.value = `会议 ${new Date().toLocaleString('zh-CN')}`
-  newMeetingAnalysisMode.value = 'hermes'
-  newMeetingHermesProfile.value = profilesStore.activeProfileName || 'default'
-  newMeetingCustomProvider.value = ''
-  newMeetingCustomModel.value = ''
-  newMeetingAgentType.value = 'hermes'
-  newMeetingCodingAgentMode.value = 'scoped'
+  newMeetingAgentType.value = 'ekko'
+  newMeetingAgentProfile.value = activeProfile.value
   newMeetingSceneTemplate.value = 'general'
-  asrApiKey.value = meetingStore.asrConfig.dashscopeApiKey || realtimeModelStore.config.apiKey
-  newMeetingAsrProvider.value = realtimeModelStore.config.asrProvider
-    || meetingStore.asrConfig.asrProvider
-    || 'dashscope'
-  newMeetingMinimaxApiKey.value = meetingStore.asrConfig.minimaxApiKey
-    || realtimeModelStore.config.minimaxApiKey
-  // 采集方式回落到实时语音；直接音频转录的引擎默认跟随当前 ASR provider。
-  // Qwen 引擎不支持区分人声，因此开关只对 MiniMax 预置为开。
   newMeetingCaptureMode.value = 'realtime'
-  directEngine.value = newMeetingAsrProvider.value === 'minimax' ? 'minimax' : 'qwen'
+  directEngine.value = defaultFileEngine()
   directDiarize.value = directEngine.value === 'minimax'
   directSpeakerCount.value = 0
   directFile.value = null
-  // LLM/OSS/步骤的重播种已随向导拆入 AsrConfigWizardDialog
-  asrWizardRef.value?.reset()
   showCreateModal.value = true
 }
 
+watch(transcriptionSetting, () => {
+  if (!showCreateModal.value || newMeetingCaptureMode.value !== 'realtime') return
+  directEngine.value = defaultFileEngine()
+  directDiarize.value = directEngine.value === 'minimax'
+})
+
 function handleCreateMeeting() {
-  if (!newMeetingTitle.value.trim()) return
-  const captureMode = newMeetingCaptureMode.value
-  const wizard = asrWizardRef.value?.collectConfig()
-  // 直接音频转录 tab 用自己选的引擎；实时语音 tab 沿用 ASR 向导的 provider。
-  const asrProvider: 'dashscope' | 'minimax' = captureMode === 'file'
-    ? (directEngine.value === 'minimax' ? 'minimax' : 'dashscope')
-    : (wizard?.asrProvider || 'dashscope')
-  const minimaxApiKey = (captureMode === 'file'
-    ? (newMeetingMinimaxApiKey.value || wizard?.minimaxApiKey || '')
-    : (wizard?.minimaxApiKey ?? '')).trim()
-  // ASR 准入校验：DashScope 走 DashScope Key（store / realtime 面板回落），
-  // MiniMax 走 MiniMax Key；两个 provider 不能混用同一个 key 字段。
-  if (asrProvider === 'dashscope'
-    && !asrApiKey.value.trim()
-    && !meetingStore.hasASRConfig
-    && !realtimeModelStore.hasApiKey) return
-  if (asrProvider === 'minimax'
-    && !minimaxApiKey
-    && !(meetingStore.asrConfig.asrProvider === 'minimax' && meetingStore.asrConfig.minimaxApiKey)
-    && !realtimeModelStore.config.minimaxApiKey) return
-
-  // 保存 ASR provider 与 DashScope / MiniMax Key
-  meetingStore.updateASRConfig({
-    asrProvider,
-    dashscopeApiKey: asrApiKey.value.trim() || meetingStore.asrConfig.dashscopeApiKey,
-    minimaxApiKey: minimaxApiKey || meetingStore.asrConfig.minimaxApiKey,
-    minimaxAsrModel: realtimeModelStore.config.minimaxAsrModel,
-    minimaxBaseUrl: realtimeModelStore.config.minimaxBaseUrl,
-  })
-
-  // 保存 LLM 配置（可选 — 没填也不阻塞创建）
-  const wizardLlmApiKey = wizard?.llmApiKey ?? ''
-  const wizardLlmBaseUrl = wizard?.llmBaseUrl ?? ''
-  const wizardLlmModel = wizard?.llmModel ?? ''
-  if (wizardLlmApiKey.trim() || wizardLlmBaseUrl.trim() || wizardLlmModel.trim()) {
-    meetingStore.updateASRConfig({
-      llmApiKey: wizardLlmApiKey.trim(),
-      llmBaseUrl: wizardLlmBaseUrl.trim() || 'https://api.deepseek.com',
-      llmModel: wizardLlmModel.trim() || 'deepseek-chat',
-    })
-  }
-  // 保存 OSS 配置（说话人分离用，可选）
-  const wizardOssBucket = wizard?.ossBucket ?? ''
-  const wizardOssAccessKeyId = wizard?.ossAccessKeyId ?? ''
-  const wizardOssAccessKeySecret = wizard?.ossAccessKeySecret ?? ''
-  if (wizardOssBucket.trim() || wizardOssAccessKeyId.trim() || wizardOssAccessKeySecret.trim()) {
-    meetingStore.updateASRConfig({
-      ossBucket: wizardOssBucket.trim(),
-      ossAccessKeyId: wizardOssAccessKeyId.trim(),
-      ossAccessKeySecret: wizardOssAccessKeySecret.trim(),
-      ossEndpoint: (wizard?.ossEndpoint ?? '').trim() || 'oss-cn-beijing.aliyuncs.com',
-      ossPathPrefix: (wizard?.ossPathPrefix ?? '').trim() || 'meeting-asr-uploads/',
-    })
-  }
-   
-  // 分析模式：默认 Agent（hermes）直接调用 Hermes Agent 的 Agent 功能生成
-  // 会议纪要、关键要点、待办事项，无需额外 LLM 配置；自定义模式（custom）
-  // 走下方填写的 LLM API Key / Base URL / 模型
-  const analysisMode = newMeetingAnalysisMode.value
-  // 使用默认 Agent 时固定用 Hermes Agent（默认配置），不受 Agent 类型选择影响
-  const effectiveAgentType = analysisMode === 'hermes' ? 'hermes' : newMeetingAgentType.value
-   
-  // 构建 Agent 配置
+  if (createMeetingDisabled.value) return
   const agentConfig: AgentConfig = {
-    agentType: effectiveAgentType,
-    codingAgentMode: newMeetingCodingAgentMode.value,
+    agentType: newMeetingAgentType.value,
+    profile: newMeetingAgentProfile.value || activeProfile.value,
   }
-   
-  // 根据 Agent 类型设置配置
-  if (effectiveAgentType === 'hermes') {
-    agentConfig.profile = newMeetingHermesProfile.value || 'default'
-  } else {
-    // Coding Agent (claude-code, codex)
-    if (newMeetingCodingAgentMode.value === 'scoped') {
-      agentConfig.provider = newMeetingCustomProvider.value
-      agentConfig.model = newMeetingCustomModel.value
-    }
-  }
-   
-  meetingStore.createSession({
+  const session = meetingStore.createSession({
     title: newMeetingTitle.value.trim(),
-    asrModel: asrWizardRef.value?.collectConfig()?.asrModel || 'paraformer-v2',
-    asrProvider,
-    analysisMode,
-    hermesProfile: effectiveAgentType === 'hermes' ? (newMeetingHermesProfile.value || 'default') : undefined,
-    customProvider: effectiveAgentType !== 'hermes' && newMeetingCodingAgentMode.value === 'scoped' ? newMeetingCustomProvider.value : undefined,
-    customModel: effectiveAgentType !== 'hermes' && newMeetingCodingAgentMode.value === 'scoped' ? newMeetingCustomModel.value : undefined,
+    analysisMode: agentConfig.agentType === 'hermes' ? 'hermes' : 'ekko',
+    hermesProfile: agentConfig.agentType === 'hermes' ? agentConfig.profile : undefined,
     agentConfig,
     sceneTemplate: newMeetingSceneTemplate.value,
   })
 
   resetMeetingState()
+  showAgentPanel.value = true
   showCreateModal.value = false
-
-  // 直接音频转录：创建后立刻把选中的整段音频送去识别
-  const createdSessionId = meetingStore.activeSessionId
-  const pickedFile = captureMode === 'file' ? directFile.value : null
-  if (captureMode === 'file' && pickedFile && createdSessionId) {
-    void runDirectTranscription(createdSessionId, pickedFile)
+  void persistMeeting(session.id)
+  if (newMeetingCaptureMode.value === 'file' && directFile.value) {
+    runDirectTranscription(session.id, directFile.value)
   }
 }
 
@@ -736,14 +535,17 @@ function selectMeetingById(sessionId: string) {
 }
 
 async function loadMeeting(session: MeetingSession) {
-  if (isRecording.value) {
-    stopRecording()
-  }
+  if (isConnecting.value) return
+  if (isRecording.value) await stopRecording()
   meetingStore.setActiveSession(session.id)
+  await pendingMeetingWrites.get(session.id)
+  if (meetingStore.activeSessionId !== session.id) return
+  session = meetingStore.sessions.find(item => item.id === session.id) || session
   
   // 从服务器加载数据
   try {
     const serverData = await meetingStorageApi.getMeeting(session.id)
+    if (meetingStore.activeSessionId !== session.id) return
     if (serverData) {
       finalSentences.value = serverData.sentences || []
       analysisResult.value = serverData.analysisResult
@@ -759,6 +561,7 @@ async function loadMeeting(session: MeetingSession) {
       useDiarize.value = HIDE_SPEAKER_DIARIZATION ? false : session.useDiarize
     }
   } catch (err) {
+    if (meetingStore.activeSessionId !== session.id) return
     console.error('Failed to load meeting from server:', err)
     // 回退到本地数据
     finalSentences.value = [...session.sentences]
@@ -790,6 +593,7 @@ async function loadAudioForSession(sessionId: string) {
   try {
     // 从服务器加载音频
     const blob = await meetingStorageApi.downloadAudio(sessionId)
+    if (meetingStore.activeSessionId !== sessionId) return
     if (blob) {
       audioBlob.value = blob
       audioUrl.value = URL.createObjectURL(blob)
@@ -801,6 +605,7 @@ async function loadAudioForSession(sessionId: string) {
   
   // 回退到 IndexedDB
   const blob = await meetingStore.getAudioBlob(sessionId)
+  if (meetingStore.activeSessionId !== sessionId) return
   if (blob) {
     audioBlob.value = blob
     audioUrl.value = URL.createObjectURL(blob)
@@ -811,18 +616,18 @@ async function loadAudioForSession(sessionId: string) {
 }
 
 async function deleteMeeting(id: string) {
+  const wasActive = meetingStore.activeSessionId === id
+  if (wasActive && isConnecting.value) return
+  if (wasActive && isRecording.value) await stopRecording()
+  meetingStore.deleteSession(id)
+  if (wasActive) resetMeetingState()
   try {
-    // 删除服务器端数据
+    await pendingMeetingWrites.get(id)
     await meetingStorageApi.deleteMeeting(id)
   } catch (err) {
     console.error('Failed to delete meeting from server:', err)
   }
-  
-  // 删除本地数据
-  meetingStore.deleteSession(id)
-  if (meetingStore.activeSessionId === id) {
-    resetMeetingState()
-  }
+
 }
 
 function resetMeetingState() {
@@ -854,28 +659,23 @@ async function saveCurrentMeeting() {
   // 保存到本地 store
   meetingStore.updateSession(meetingStore.activeSessionId, sessionData)
   
-  // 保存到服务器
-  try {
-    const meetingId = meetingStore.activeSessionId
-    const meeting = meetingStore.activeSession
-    
-    if (meeting) {
-      await meetingStorageApi.saveMeeting(meetingId, {
-        ...meeting,
-        ...sessionData,
-      })
-      
-      // 保存转写内容
-      if (finalSentences.value.length > 0) {
-        await meetingStorageApi.saveTranscript(meetingId, finalSentences.value)
-      }
-    }
-  } catch (err) {
-    console.error('Failed to save meeting to server:', err)
-    // 本地 store 与 IndexedDB 音频备份仍然有效，但服务端没有这份数据——
-    // 用户换设备 / 清浏览器数据后会丢，必须让用户知道而不是静默失败。
+  await persistMeeting(meetingStore.activeSessionId)
+}
+
+async function persistMeeting(meetingId: string) {
+  const meeting = meetingStore.sessions.find(session => session.id === meetingId)
+  if (!meeting) return
+  const previous = pendingMeetingWrites.get(meetingId) || Promise.resolve()
+  const pending = previous.then(async () => {
+    await meetingStorageApi.saveMeeting(meetingId, meeting)
+    await meetingStorageApi.saveTranscript(meetingId, meeting.sentences)
+  }).catch((err) => {
+    console.error('[meeting] failed to save meeting:', err)
     message.error(t('meeting.errorSaveMeetingFailed'))
-  }
+  })
+  pendingMeetingWrites.set(meetingId, pending)
+  await pending
+  if (pendingMeetingWrites.get(meetingId) === pending) pendingMeetingWrites.delete(meetingId)
 }
 
 // --- 说话人重命名 ---
@@ -905,113 +705,21 @@ async function checkASRServiceStatus() {
   }
 }
 
-async function startASRService() {
-  // Check both the persisted store AND the current wizard input — when
-  // the browser origin changes (different dev port, incognito, etc.)
-  // localStorage is empty but the user may have just re-entered OSS config
-  // in the wizard. Without checking the wizard we'd skip restart and
-  // keep using the already-running (OSS-less) service.
-  const wizard = asrWizardRef.value?.collectConfig()
-  const hasOSS =
-    meetingStore.asrConfig.ossBucket || (wizard?.ossBucket ?? '').trim() ||
-    meetingStore.asrConfig.ossAccessKeyId || (wizard?.ossAccessKeyId ?? '').trim() ||
-    meetingStore.asrConfig.ossAccessKeySecret || (wizard?.ossAccessKeySecret ?? '').trim()
-  if (asrServiceStatus.value.isRunning && !hasOSS) return true
-
+async function startASRService(profile = activeProfile.value) {
   isStartingASR.value = true
   asrServiceError.value = ''
-  // Reflect the most useful startup hint we have before the call returns.
-  // The service exposes finer-grained phases (venv / pip_install / starting)
-  // via /status, but those update asynchronously after this coroutine yields,
-  // so we pick a phase copy that stays accurate for the full call window.
   statusText.value = t('meeting.startup.starting')
 
   try {
-    // Get ASR config from meeting store and current session
-    const activeSession = meetingStore.activeSession
-    const asrProvider = activeSession?.asrProvider
-      || meetingStore.asrConfig.asrProvider
-      || 'dashscope'
-    const config: Record<string, unknown> = {
-      asrProvider,
-      asrModel: activeSession?.asrModel || 'paraformer-v2',
+    await transcriptionLoad
+    const result = await meetingASRApi.start({}, profile)
+    if (result.status !== 'started' && result.status !== 'already_running') {
+      throw new Error(result.error || t('meeting.startup.error'))
     }
-    // DashScope provider → 需要 DashScope Key（store / realtime 面板回落）
-    if (asrProvider === 'dashscope') {
-      config.dashscopeApiKey = meetingStore.asrConfig.dashscopeApiKey
-        || asrApiKey.value
-        || realtimeModelStore.config.apiKey
-    }
-    // MiniMax 凭据与会话 provider 解耦：整段「拆分人声」对话框允许临时切到
-    // MiniMax（会话本身可能是 DashScope），所以只要手上有 key/模型就一并下发给
-    // 后端 —— 后端按每个请求的 engine 路由，多带一份凭据没有副作用。
-    const minimaxKey = meetingStore.asrConfig.minimaxApiKey
-      || newMeetingMinimaxApiKey.value.trim()
-      || realtimeModelStore.config.minimaxApiKey
-    if (minimaxKey) config.minimaxApiKey = minimaxKey
-    config.minimaxAsrModel = meetingStore.asrConfig.minimaxAsrModel
-      || realtimeModelStore.config.minimaxAsrModel
-    config.minimaxBaseUrl = meetingStore.asrConfig.minimaxBaseUrl
-      || realtimeModelStore.config.minimaxBaseUrl
-    // Pass LLM config if user provided it, so backend has it from the start.
-    if (meetingStore.asrConfig.llmApiKey || wizard?.llmApiKey) {
-      config.llmApiKey = meetingStore.asrConfig.llmApiKey || wizard?.llmApiKey
-      config.llmBaseUrl = meetingStore.asrConfig.llmBaseUrl || wizard?.llmBaseUrl
-      config.llmModel = meetingStore.asrConfig.llmModel || wizard?.llmModel
-    }
-    // Pass OSS config if user configured it (speaker diarization chunk flow).
-    // Fallback to the current wizard input when the persisted store
-    // is empty — without this, edits made in the wizard that haven't yet been
-    // flushed via updateASRConfig() would silently get dropped on the wire.
-    const store = meetingStore.asrConfig
-    const ossBucketValue = store.ossBucket || (wizard?.ossBucket ?? '').trim()
-    const ossAccessKeyIdValue = store.ossAccessKeyId || (wizard?.ossAccessKeyId ?? '').trim()
-    const ossAccessKeySecretValue = store.ossAccessKeySecret || (wizard?.ossAccessKeySecret ?? '').trim()
-    if (ossBucketValue || ossAccessKeyIdValue || ossAccessKeySecretValue) {
-      config.ossBucket = ossBucketValue
-      config.ossAccessKeyId = ossAccessKeyIdValue
-      config.ossAccessKeySecret = ossAccessKeySecretValue
-      config.ossEndpoint = store.ossEndpoint || (wizard?.ossEndpoint ?? '').trim() || 'oss-cn-beijing.aliyuncs.com'
-      config.ossPathPrefix = store.ossPathPrefix || (wizard?.ossPathPrefix ?? '').trim() || 'meeting-asr-uploads/'
-    }
-
-    console.log('[meeting] Calling ASR start API with config:', {
-      ...config,
-      dashscopeApiKey: config.dashscopeApiKey ? '***' : 'not set',
-      minimaxApiKey: config.minimaxApiKey ? '***' : 'not set',
-    })
-    const result = await meetingASRApi.start(config)
-    console.log('[meeting] ASR start result:', result)
-
-    if (result.status === 'started' || result.status === 'already_running') {
-      asrServiceStatus.value = {
-        isRunning: true,
-        asrPort: result.asrPort,
-        diarizePort: result.diarizePort,
-        pid: result.pid,
-        uptime: result.uptime,
-        error: null,
-      }
-      return true
-    } else {
-      asrServiceError.value = result.error || t('meeting.startup.error')
-      console.error('[meeting] ASR service failed to start:', asrServiceError.value)
-      message.error(asrServiceError.value)
-      return false
-    }
-  } catch (err: any) {
-    // Backend annotates hot-config push failures with a "config push failed:"
-    // prefix (see MeetingASRService.start). Detect that distinctly so the user
-    // knows their updated key did not take effect — previously this was
-    // swallowed and the wrong key kept being used.
-    const raw = err?.message || String(err)
-    if (raw.includes('config push failed')) {
-      asrServiceError.value = t('meeting.errorConfigUpdateFailed')
-    } else if (/not running|not ready|timeout/i.test(raw)) {
-      asrServiceError.value = t('meeting.errorServiceNotReady')
-    } else {
-      asrServiceError.value = raw || t('meeting.startup.error')
-    }
+    asrServiceStatus.value = { ...result, isRunning: true }
+    return true
+  } catch (err) {
+    asrServiceError.value = err instanceof Error ? err.message : t('meeting.startup.error')
     console.error('[meeting] ASR service start error:', err)
     message.error(asrServiceError.value)
     return false
@@ -1020,17 +728,24 @@ async function startASRService() {
   }
 }
 
+async function startRealtimeTranscription(profile: string) {
+  if (profile === activeProfile.value) {
+    await transcriptionLoad
+    if (!realtimeConfigured.value) {
+      asrServiceError.value = t('models.meetingTranscription.notConfigured')
+      return false
+    }
+  }
+  return startASRService(profile)
+}
+
 // --- 生命周期 ---
 onMounted(async () => {
-  // 加载模型和配置
-  await profilesStore.fetchProfiles()
-  await modelsStore.fetchProviders()
-  
-  // 检查 ASR 服务状态
-  await checkASRServiceStatus()
-
-  // 同步服务端会议列表 (触摸屏设备端创建的会议, 合并进侧边栏)
-  await meetingStore.syncSessionsFromServer()
+  await Promise.all([
+    profilesStore.fetchProfiles(),
+    checkASRServiceStatus(),
+    meetingStore.syncSessionsFromServer(),
+  ])
   
   // 如果有活跃会议，加载它
   if (meetingStore.activeSession) {
@@ -1047,12 +762,8 @@ onUnmounted(() => {
 
 // 推送句子到实时辅助服务（fire-and-forget）
 function pushSentenceToAssist(sessionId: string, sentence: TranscriptSentence) {
-  fetch('/api/studio/meeting-asr/assist/sentence', {
+  request('/api/studio/meeting-asr/assist/sentence', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(getApiKey() ? { Authorization: `Bearer ${getApiKey()}` } : {}),
-    },
     body: JSON.stringify({
       sessionId,
       speaker: sentence.speaker,
@@ -1172,54 +883,17 @@ function handleWsMessage(data: any, source: 'asr' | 'diarize' = 'asr') {
   }
 }
 
-function onAgentCompleted() {
-  // 分析完成后自动切换到报告视图
-  if (htmlContent.value) {
-    showAgentPanel.value = false
-  }
-}
-
-function onAgentCorrected(corrected: any[]) {
-  // 更新本地字幕
-  finalSentences.value = [...corrected]
-}
-
-// --- Agent 面板事件处理（meeting 分支合并） ---
-function onAgentAnalysisResult(result: any) {
-  analysisResult.value = result
-  // 保存到 store
-  if (meetingStore.activeSessionId) {
-    meetingStore.updateAnalysis(meetingStore.activeSessionId, result)
-  }
-}
-
-function onAgentReportHtml(html: string) {
-  htmlContent.value = html
-  // 保存到 store
-  if (meetingStore.activeSessionId) {
-    meetingStore.updateHtmlContent(meetingStore.activeSessionId, html)
-  }
-}
-
-// --- Hermes Agent 分析 ---
-async function analyzeWithHermesAgent() {
-  if (!meetingStore.activeSession) return
-  
+async function triggerAnalysis() {
   const session = meetingStore.activeSession
-  
-  // 构建带说话人信息的转写内容
-  const transcriptLines = session.sentences.map(s => {
-    const speaker = s.speaker ? `[${s.speaker}] ` : ''
-    return `${speaker}${s.text}`
-  })
-  const transcript = transcriptLines.join('\n')
-  
+  if (!session) return
+  const transcript = formatTranscriptForTitle(session.sentences)
   if (!transcript.trim()) {
     errorMessage.value = t('meeting.noTranscript')
     return
   }
-  
+
   // 切换到 Agent 面板并触发报告生成
+  showRightPanel.value = true
   showAgentPanel.value = true
   await nextTick()
   if (assistPanelRef.value) {
@@ -1247,75 +921,7 @@ function formatActionDeadline(item: any): string {
 // 声浪可视化已迁移到 <WaveformCanvas>，本组件只保留 analyser ref 与录音控制。
 
 // --- 分析功能 ---
-async function startAnalysis() {
-  const session = meetingStore.activeSession
-  if (!session) return
-  
-  // 检查是否有逐字稿
-  if (sentences.value.length === 0) {
-    errorMessage.value = t('meeting.noTranscript')
-    return
-  }
-  
-  // Hermes Agent 模式下，切换到 Agent 面板并启动分析
-  if (session.analysisMode === 'hermes') {
-    await analyzeWithHermesAgent()
-    return
-  }
-  
-  // 自定义模型模式下，调用后端自动分析
-  try {
-    isAnalyzing.value = true
-    const config = {
-      interval_seconds: analysisInterval.value,
-      interval_sentences: analysisIntervalSentences.value,
-      trigger_mode: analysisTriggerMode.value,
-    }
-    const result = await meetingASRApi.startAnalysis(config)
-    console.log('Analysis started:', result)
-
-    // 开始轮询结果
-    pollAnalysisResult()
-  } catch (error) {
-    console.error('Failed to start analysis:', error)
-    errorMessage.value = t('meeting.analysisStartError')
-  }
-}
-
-async function stopAnalysis() {
-  const session = meetingStore.activeSession
-  if (!session) return
-  
-  isAnalyzing.value = false
-  
-  // 自定义模型模式下，调用后端停止分析
-  if (session.analysisMode === 'custom') {
-    try {
-      await meetingASRApi.stopAnalysis()
-    } catch (error) {
-      console.error('Failed to stop analysis:', error)
-    }
-  }
-}
-
-async function pollAnalysisResult() {
-  try {
-    const result = await meetingASRApi.getAnalysisResult()
-    if (result) {
-      analysisResult.value = result
-    }
-  } catch (error) {
-    console.error('Failed to fetch analysis result:', error)
-  }
-}
-
-async function triggerAnalysis() {
-  await analyzeWithHermesAgent()
-}
-
 async function clearTranscript() {
-  // Backend transcript endpoint removed in v0.7.6 (audit #17). Local store
-  // already holds the canonical transcript; just clear the UI.
   finalSentences.value = []
   partialText.value = ''
   analysisResult.value = null
@@ -1327,6 +933,7 @@ async function clearTranscript() {
   // 清空 store 中的数据
   if (meetingStore.activeSessionId) {
     meetingStore.clearSession(meetingStore.activeSessionId)
+    await persistMeeting(meetingStore.activeSessionId)
   }
 }
 </script>
@@ -1403,6 +1010,9 @@ async function clearTranscript() {
           </div>
           <div v-if="errorMessage" class="error-message">
             {{ errorMessage }}
+            <NButton v-if="transcriptionSetting && !realtimeConfigured" text type="primary" @click="openTranscriptionSettings">
+              {{ t('models.meetingTranscription.openSettings') }}
+            </NButton>
           </div>
           <div class="status-actions">
             <NTooltip trigger="hover">
@@ -1477,7 +1087,7 @@ async function clearTranscript() {
         :show-agent-panel="showAgentPanel"
         :can-download-audio="!isRecording && !!audioUrl"
         :can-diarize="!isRecording && !!audioBlob"
-        :is-diarizing="isTranscribing"
+        :is-diarizing="transcriptionBusy"
         :resize-style="rightPanelStyle"
         @close="showRightPanel = false"
         @download-audio="downloadAudio"
@@ -1491,7 +1101,6 @@ async function clearTranscript() {
                 <NButton
                   size="tiny"
                   type="primary"
-                  :loading="isLoading && !isAnalyzing"
                   :disabled="sentences.length === 0"
                   @click="triggerAnalysis"
                 >
@@ -1510,52 +1119,10 @@ async function clearTranscript() {
               size="tiny"
               type="primary"
               @click="triggerAnalysis"
-              :loading="isLoading"
               :disabled="sentences.length === 0"
             >
               {{ t('meeting.generateReport') }}
             </NButton>
-
-            <NTooltip trigger="hover">
-              <template #trigger>
-                <NButton
-                  size="tiny"
-                  :type="isAnalyzing ? 'warning' : 'default'"
-                  :disabled="sentences.length === 0"
-                  @click="isAnalyzing ? stopAnalysis() : startAnalysis()"
-                >
-                  <template #icon>
-                    <svg v-if="!isAnalyzing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="12" cy="12" r="10"/>
-                      <polyline points="12 6 12 12 16 14"/>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <rect x="6" y="4" width="4" height="16"/>
-                      <rect x="14" y="4" width="4" height="16"/>
-                    </svg>
-                  </template>
-                  {{ isAnalyzing ? t('meeting.stopAnalysis') : t('meeting.startAnalysis') }}
-                </NButton>
-              </template>
-            </NTooltip>
-
-            <NTooltip trigger="hover">
-              <template #trigger>
-                <NButton
-                  size="tiny"
-                  quaternary
-                  @click="showAnalysisConfig = true"
-                >
-                  <template #icon>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="12" cy="12" r="3"/>
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                    </svg>
-                  </template>
-                </NButton>
-              </template>
-              {{ t('meeting.analysisTriggerConfig') }}
-            </NTooltip>
 
             <!-- Agent 切换：靠右 -->
             <NTooltip trigger="hover">
@@ -1614,17 +1181,13 @@ async function clearTranscript() {
         <template #agent>
           <MeetingAgentPanel
             v-if="meetingStore.activeSessionId"
+            :key="meetingStore.activeSessionId"
             ref="assistPanelRef"
             :session-id="meetingStore.activeSessionId"
             :scene-template="activeSession?.sceneTemplate || 'general'"
             :is-recording="isRecording"
             @report-generated="onReportGenerated"
-            @request-report="onRequestReport"
-            :start-trigger="agentStartAnalysisTrigger"
-            @update:analysis-result="onAgentAnalysisResult"
-            @update:report-html="onAgentReportHtml"
-            @completed="onAgentCompleted"
-            @corrected="onAgentCorrected"
+            @request-report="triggerAnalysis"
           />
         </template>
 
@@ -1830,7 +1393,6 @@ async function clearTranscript() {
               <NButton
                 type="primary"
                 size="small"
-                :loading="isLoading && !isAnalyzing"
                 :disabled="sentences.length === 0"
                 @click="triggerAnalysis"
               >
@@ -1856,7 +1418,8 @@ async function clearTranscript() {
                   </NButton>
                 </div>
               </div>
-              <iframe :srcdoc="htmlContent" class="report-preview-iframe"></iframe>
+              <iframe v-if="isHtmlReport" :srcdoc="htmlContent" sandbox="" class="report-preview-iframe"></iframe>
+              <MarkdownRenderer v-else :content="htmlContent" />
             </div>
 
             <!-- 空状态 -->
@@ -1900,171 +1463,69 @@ async function clearTranscript() {
 
         <!-- 采集方式：实时语音（麦克风） / 直接音频转录（上传整段音频） -->
         <NTabs v-model:value="newMeetingCaptureMode" type="line" animated>
-          <NTabPane name="realtime" :tab="t('meeting.createTabRealtime')" display-directive="show">
-            <!-- ASR 配置向导（拆分至 AsrConfigWizardDialog，行为保持不变） -->
-            <AsrConfigWizardDialog
-              ref="asrWizardRef"
-              v-model:asr-api-key="asrApiKey"
-              v-model:analysis-mode="newMeetingAnalysisMode"
-              v-model:asr-provider="newMeetingAsrProvider"
-              v-model:minimax-api-key="newMeetingMinimaxApiKey"
-            />
-          </NTabPane>
-          <NTabPane name="file" :tab="t('meeting.createTabFile')" display-directive="show">
+          <NTabPane name="realtime" :tab="t('meeting.createTabRealtime')" />
+          <NTabPane name="file" :tab="t('meeting.createTabFile')">
             <DirectTranscribeForm
               v-model:engine="directEngine"
               v-model:diarize="directDiarize"
               v-model:speaker-count="directSpeakerCount"
               v-model:file="directFile"
+              :minimax-configured="transcriptionSetting?.minimaxKeyConfigured"
+              :dashscope-configured="transcriptionSetting?.dashscopeKeyConfigured"
             />
           </NTabPane>
         </NTabs>
 
-        <div class="form-section">
-          <div class="form-section-title">{{ t('meeting.agentConfig') }}</div>
-          <!-- 默认 Agent 模式：固定使用 Hermes Agent，仅需选择 Agent 配置（profile） -->
-          <template v-if="newMeetingAnalysisMode === 'hermes'">
-            <div class="form-item">
-              <label class="form-label">{{ t('meeting.selectProfile') }}</label>
-              <NSelect
-                v-model:value="newMeetingHermesProfile"
-                :options="profileOptions"
-                :placeholder="t('meeting.selectProfilePlaceholder')"
-              />
-            </div>
+        <NAlert
+          v-if="newMeetingCaptureMode === 'realtime' || !captureConfigured"
+          :type="captureConfigured ? 'info' : 'warning'"
+          :show-icon="false"
+        >
+          <template v-if="transcriptionSettingError">
+            <NButton text @click="refreshTranscriptionSetting(activeProfile)">{{ t('common.retry') }}</NButton>
           </template>
-
-          <!-- 自定义 LLM 模式：可选择 Hermes Agent 或 Coding Agent -->
-          <template v-else>
-            <div class="form-item">
-              <label class="form-label">{{ t('meeting.agentType') }}</label>
-              <NSelect
-                v-model:value="newMeetingAgentType"
-                :options="agentTypeOptions"
-                :placeholder="t('meeting.selectAgentType')"
-              />
-            </div>
-
-            <!-- Hermes Agent 配置 -->
-            <template v-if="newMeetingAgentType === 'hermes'">
-              <div class="form-item">
-                <label class="form-label">{{ t('meeting.selectProfile') }}</label>
-                <NSelect
-                  v-model:value="newMeetingHermesProfile"
-                  :options="profileOptions"
-                  :placeholder="t('meeting.selectProfilePlaceholder')"
-                />
-              </div>
-            </template>
-
-            <!-- Coding Agent 配置 -->
-            <template v-if="newMeetingAgentType === 'claude-code' || newMeetingAgentType === 'codex'">
-              <div class="form-item">
-                <label class="form-label">{{ t('meeting.codingAgentMode') }}</label>
-                <NRadioGroup v-model:value="newMeetingCodingAgentMode">
-                  <NRadio v-for="option in codingAgentModeOptions" :key="option.value" :value="option.value">
-                    <div class="radio-content">
-                      <span class="radio-title">{{ option.label }}</span>
-                      <span class="radio-desc">{{ option.description }}</span>
-                    </div>
-                  </NRadio>
-                </NRadioGroup>
-              </div>
-              <template v-if="newMeetingCodingAgentMode === 'scoped'">
-                <div class="form-item">
-                  <label class="form-label">{{ t('meeting.selectProvider') }}</label>
-                  <NSelect
-                    v-model:value="newMeetingCustomProvider"
-                    :options="providerOptions"
-                    :placeholder="t('meeting.selectProviderPlaceholder')"
-                    @update:value="newMeetingCustomModel = ''"
-                  />
-                </div>
-                <div v-if="newMeetingCustomProvider" class="form-item">
-                  <label class="form-label">{{ t('meeting.selectModel') }}</label>
-                  <NSelect
-                    v-model:value="newMeetingCustomModel"
-                    :options="modelOptions"
-                    :placeholder="t('meeting.selectModelPlaceholder')"
-                  />
-                </div>
-              </template>
-            </template>
+          <NSpin v-else-if="!transcriptionSetting" size="small" />
+          <template v-else-if="!captureConfigured">{{ t('models.meetingTranscription.notConfigured') }}</template>
+          <template v-else-if="newMeetingCaptureMode === 'realtime'">
+            {{ transcriptionProviderLabel }} · {{ transcriptionModel }}
           </template>
+          <NButton text type="primary" class="transcription-settings-link" @click="openTranscriptionSettings">
+            {{ t('models.meetingTranscription.openSettings') }}
+          </NButton>
+        </NAlert>
+
+        <div class="form-item">
+          <label class="form-label" for="meeting-agent">{{ t('meeting.agentType') }}</label>
+          <NSelect
+            v-model:value="newMeetingAgentType"
+            :options="agentTypeOptions"
+            :input-props="{ id: 'meeting-agent', 'aria-label': t('meeting.agentType') }"
+          />
+        </div>
+        <div class="form-item">
+          <label class="form-label" for="meeting-agent-profile">{{ t('meeting.selectProfile') }}</label>
+          <NSelect
+            v-model:value="newMeetingAgentProfile"
+            :options="profileOptions"
+            :placeholder="t('meeting.selectProfilePlaceholder')"
+            :input-props="{ id: 'meeting-agent-profile', 'aria-label': t('meeting.selectProfile') }"
+          />
         </div>
       </div>
     </CreateMeetingDialog>
 
-    <!-- 拆分人声对话框（选择识别模型 + Qwen 所需 OSS） -->
     <DiarizeWholeFileDialog
       v-model:visible="showDiarizeDialog"
-      :default-engine="activeTranscribeEngine()"
-      :default-speaker-count="speakerCount || 0"
-      :minimax-key-available="!!(meetingStore.asrConfig.minimaxApiKey || realtimeModelStore.config.minimaxApiKey)"
-      :dashscope-key-available="!!(meetingStore.asrConfig.dashscopeApiKey || realtimeModelStore.hasApiKey)"
-      :oss="{
-        bucket: meetingStore.asrConfig.ossBucket,
-        accessKeyId: meetingStore.asrConfig.ossAccessKeyId,
-        accessKeySecret: meetingStore.asrConfig.ossAccessKeySecret,
-        endpoint: meetingStore.asrConfig.ossEndpoint,
-        pathPrefix: meetingStore.asrConfig.ossPathPrefix,
-      }"
-      :busy="isTranscribing"
+      :default-engine="transcriptionSetting?.ossConfigured ? defaultFileEngine() : 'minimax'"
+      :default-speaker-count="speakerCount"
+      :minimax-key-available="transcriptionSetting?.minimaxKeyConfigured"
+      :dashscope-key-available="transcriptionSetting?.dashscopeKeyConfigured"
+      :oss-configured="transcriptionSetting?.ossConfigured"
+      :busy="transcriptionBusy"
+      @open-settings="openTranscriptionSettings"
       @start="onDiarizeStart"
     />
 
-    <!-- 分析触发配置弹窗 -->
-    <NModal
-      v-model:show="showAnalysisConfig"
-      :title="t('meeting.analysisTriggerConfig')"
-      preset="dialog"
-      :positive-text="t('common.confirm')"
-      :negative-text="t('common.cancel')"
-      @positive-click="showAnalysisConfig = false"
-    >
-      <div class="analysis-config-form">
-        <div class="config-field">
-          <label>{{ t('meeting.triggerMode') }}</label>
-          <select v-model="analysisTriggerMode" class="config-select">
-            <option value="sentences">{{ t('meeting.triggerModeSentences') }}</option>
-            <option value="time">{{ t('meeting.triggerModeTime') }}</option>
-            <option value="both">{{ t('meeting.triggerModeBoth') }}</option>
-          </select>
-        </div>
-        
-        <div class="config-field" v-if="analysisTriggerMode !== 'time'">
-          <label>{{ t('meeting.intervalSentences') }}</label>
-          <div class="config-input-group">
-            <input 
-              type="number" 
-              v-model="analysisIntervalSentences" 
-              :min="1" 
-              :max="100"
-              class="config-input"
-            />
-            <span class="config-unit">{{ t('meeting.sentencesUnit') }}</span>
-          </div>
-          <span class="config-hint">{{ t('meeting.intervalSentencesHint') }}</span>
-        </div>
-        
-        <div class="config-field" v-if="analysisTriggerMode !== 'sentences'">
-          <label>{{ t('meeting.intervalSeconds') }}</label>
-          <div class="config-input-group">
-            <input 
-              type="number" 
-              v-model="analysisInterval" 
-              :min="10" 
-              :max="600"
-              class="config-input"
-            />
-            <span class="config-unit">{{ t('meeting.secondsUnit') }}</span>
-          </div>
-          <span class="config-hint">{{ t('meeting.intervalSecondsHint') }}</span>
-        </div>
-      </div>
-    </NModal>
-
-    <!-- HTML 报告弹窗 -->
     <div v-if="showReport" class="report-modal" @click.self="showReport = false">
       <div class="report-container">
         <div class="report-header">
@@ -2076,7 +1537,8 @@ async function clearTranscript() {
             </svg>
           </button>
         </div>
-        <iframe :srcdoc="htmlContent" class="report-iframe"></iframe>
+        <iframe v-if="isHtmlReport" :srcdoc="htmlContent" sandbox="" class="report-iframe"></iframe>
+        <MarkdownRenderer v-else :content="htmlContent" />
       </div>
     </div>
   </div>
@@ -2930,18 +2392,8 @@ async function clearTranscript() {
   gap: 16px;
 }
 
-.form-section {
-  padding: 12px;
-  background: rgba(var(--accent-primary-rgb), 0.03);
-  border-radius: 8px;
-  border: 1px solid rgba(var(--accent-primary-rgb), 0.1);
-}
-
-.form-section-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: $text-primary;
-  margin-bottom: 12px;
+.transcription-settings-link {
+  margin-inline-start: 8px;
 }
 
 .form-item {
@@ -2959,92 +2411,10 @@ async function clearTranscript() {
   gap: 8px;
 }
 
-.form-label-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(var(--success-rgb), 0.1);
-  color: var(--success);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.form-tutorial-link {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--color-primary, var(--accent-info));
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-  opacity: 0.75;
-  transition: opacity 0.2s;
-}
-
-.form-tutorial-link:hover {
-  opacity: 1;
-}
-
 .form-hint {
   font-size: 12px;
   color: $text-secondary;
   line-height: 1.4;
-}
-
-.oss-config-details {
-  margin-top: 12px;
-  border: 1px solid rgba(var(--accent-primary-rgb), 0.15);
-  border-radius: $radius-sm;
-  overflow: hidden;
-}
-
-.oss-config-summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  font-size: 13px;
-  font-weight: 500;
-  color: $text-primary;
-  cursor: pointer;
-  user-select: none;
-  background: rgba(var(--accent-primary-rgb), 0.03);
-  transition: background 0.2s;
-
-  &:hover {
-    background: rgba(var(--accent-primary-rgb), 0.07);
-  }
-
-  svg {
-    flex-shrink: 0;
-    color: $accent-primary;
-  }
-
-  &::-webkit-details-marker {
-    display: none;
-  }
-}
-
-.oss-config-body {
-  padding: 10px;
-  border-top: 1px solid rgba(var(--accent-primary-rgb), 0.1);
-}
-
-.radio-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.radio-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: $text-primary;
-}
-
-.radio-desc {
-  font-size: 12px;
-  color: $text-secondary;
 }
 
 /* Agent 分析相关样式*/
@@ -3170,72 +2540,4 @@ async function clearTranscript() {
   white-space: pre-wrap;
 }
 
-/* 分析配置弹窗表单样式*/
-.analysis-config-form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 8px 0;
-}
-
-.config-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-
-  label {
-    font-size: 13px;
-    font-weight: 500;
-    color: $text-primary;
-  }
-}
-
-.config-select {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid $border-color;
-  border-radius: 6px;
-  font-size: 14px;
-  background: var(--theme-card-bg, var(--bg-card));
-  color: $text-primary;
-  cursor: pointer;
-
-  &:focus {
-    outline: none;
-    border-color: $accent-primary;
-  }
-}
-
-.config-input-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.config-input {
-  flex: 1;
-  padding: 8px 12px;
-  border: 1px solid $border-color;
-  border-radius: 6px;
-  font-size: 14px;
-  background: var(--theme-card-bg, var(--bg-card));
-  color: $text-primary;
-
-  &:focus {
-    outline: none;
-    border-color: $accent-primary;
-  }
-}
-
-.config-unit {
-  font-size: 14px;
-  color: $text-secondary;
-  white-space: nowrap;
-}
-
-.config-hint {
-  font-size: 12px;
-  color: $text-secondary;
-  opacity: 0.8;
-}
 </style>

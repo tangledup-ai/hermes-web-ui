@@ -4,11 +4,12 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 const runtime = vi.hoisted(() => ({
   asrPort: 0, diarizePort: 0,
-  ensureReady: vi.fn(async () => {}), pushKey: vi.fn(async () => {}),
+  ensureReady: vi.fn(async () => {}),
+  contexts: [] as unknown[],
 }))
 vi.mock('../../packages/server/src/modules/studio/public/auth', () => ({
   isAuthEnabled: async () => true,
-  authenticateUserToken: async (token: string) => token === 'meeting-user' ? { id: 1 } : null,
+  authenticateUserToken: async (token: string) => token === 'meeting-user' ? { id: 1, profiles: ['default', 'work'] } : null,
   getToken: async () => 'meeting-server-token',
 }))
 vi.mock('../../packages/server/src/modules/studio/services/meeting-asr', () => ({
@@ -16,7 +17,6 @@ vi.mock('../../packages/server/src/modules/studio/services/meeting-asr', () => (
     getASRPort: () => runtime.asrPort,
     getDiarizePort: () => runtime.diarizePort,
     useTls: false,
-    ensureDashScopeKeyPushed: runtime.pushKey,
   },
 }))
 vi.mock('../../packages/server/src/modules/studio/services/realtime-backend', () => ({
@@ -41,6 +41,8 @@ async function backend(label: string) {
     sockets.push(socket)
     expect(req.headers.authorization).toBeUndefined()
     expect(req.headers.cookie).toBeUndefined()
+    expect(req.headers['x-studio-transcription-token']).toMatch(/^[a-f0-9]{64}$/)
+    runtime.contexts.push(JSON.parse(Buffer.from(String(req.headers['x-studio-transcription-context']), 'base64url').toString()))
     socket.send(`${label}:${req.url}`)
   })
   return listen(server)
@@ -49,6 +51,7 @@ afterEach(async () => {
   sockets.splice(0).forEach(socket => socket.terminate())
   backends.splice(0).forEach(server => server.close())
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
+  runtime.contexts.length = 0
   vi.clearAllMocks()
 })
 
@@ -66,7 +69,7 @@ it.each(['/ws/asr', '/ws/diarize', '/ws/omni-realtime'])('forwards %s upgrades, 
   })
   expect(message).toBe(`${path === '/ws/diarize' ? 'diarize' : 'asr'}:${path}?profile=default`)
   expect(runtime.ensureReady).toHaveBeenCalledTimes(path === '/ws/omni-realtime' ? 1 : 0)
-  expect(runtime.pushKey).toHaveBeenCalledTimes(path === '/ws/omni-realtime' ? 1 : 0)
+  expect(runtime.contexts).toMatchObject([{ owner: JSON.stringify(['default', null]) }])
 })
 
 async function proxyServer() {
@@ -79,6 +82,7 @@ async function proxyServer() {
 it.each([
   { token: '', expected: 401, origin: '' },
   { token: '?token=meeting-user', expected: 403, origin: 'https://untrusted.invalid' },
+  { token: '?token=meeting-user&profile=private', expected: 403, origin: '' },
 ])('rejects browser upgrades with HTTP $expected before starting ASR', async ({ token, expected, origin }) => {
   const port = await proxyServer()
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/omni-realtime${token}`, { origin: origin || `http://127.0.0.1:${port}` })
@@ -95,7 +99,10 @@ it.each(['meeting-user', 'meeting-server-token'])('accepts valid credentials wit
   const port = await proxyServer()
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/asr?profile=default&token=${token}`, {
     origin: `http://127.0.0.1:${port}`,
-    headers: { Authorization: `Bearer ${token}`, Cookie: 'session=private' },
+    headers: {
+      Authorization: `Bearer ${token}`, Cookie: 'session=private',
+      'x-studio-transcription-context': 'forged', 'x-studio-transcription-token': 'forged',
+    },
   })
   sockets.push(socket)
   const message = await new Promise<string>((resolve, reject) => {
@@ -103,4 +110,5 @@ it.each(['meeting-user', 'meeting-server-token'])('accepts valid credentials wit
     socket.once('error', reject)
   })
   expect(message).toBe('asr:/ws/asr?profile=default')
+  expect(runtime.contexts).toMatchObject([{ owner: JSON.stringify(['default', token === 'meeting-user' ? 1 : null]) }])
 })

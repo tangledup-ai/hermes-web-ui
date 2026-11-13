@@ -16,10 +16,17 @@ export interface MeetingData {
   speakerMap: Record<string, string>
   speakers: SpeakerEntry[]
   status: 'idle' | 'recording' | 'paused' | 'completed'
-  analysisMode: 'hermes' | 'custom'
+  analysisMode: 'ekko' | 'hermes' | 'custom'
   hermesProfile?: string
   customProvider?: string
   customModel?: string
+  agentConfig?: {
+    agentType: 'ekko' | 'hermes' | 'claude-code' | 'codex'
+    profile?: string
+    provider?: string
+    model?: string
+  }
+  sceneTemplate?: string
   audioDuration: number
 }
 

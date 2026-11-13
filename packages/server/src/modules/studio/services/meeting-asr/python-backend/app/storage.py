@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .models import AllConfig, AnalysisResult, AnalysisStatus, ASRConfig, LLMConfig, AnalysisConfig
-from .config import settings
+from .config import default_settings as settings
 
 log = logging.getLogger("storage")
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from contextvars import copy_context
 import json
 import logging
 import time
@@ -211,7 +212,7 @@ async def _run_ws_transcribe(
             asyncio.set_event_loop(None)
 
     loop = asyncio.get_running_loop()
-    c_future = _ws_executor.submit(_sync_run)
+    c_future = _ws_executor.submit(copy_context().run, _sync_run)
     a_future = asyncio.wrap_future(c_future, loop=loop)
     try:
         return await a_future
@@ -389,23 +390,19 @@ async def _process_chunk_async(session: DiarizeSession, chunk_pcm: bytes, offset
     cfg = session.config
     client = DiarizeClient()
     try:
-        loop = asyncio.get_running_loop()
-        file_url = await loop.run_in_executor(
-            None,
+        file_url = await asyncio.to_thread(
             upload_wav_to_oss,
             chunk_pcm,
             cfg.sample_rate,
             session.session_id,
             chunk_idx,
         )
-        task_id = await loop.run_in_executor(
-            None,
-            lambda: client.submit_chunk(
-                file_url=file_url,
-                language_hints=cfg.language_hints,
-                speaker_count=cfg.speaker_count,
-                diarization_enabled=cfg.diarization_enabled,
-            ),
+        task_id = await asyncio.to_thread(
+            client.submit_chunk,
+            file_url=file_url,
+            language_hints=cfg.language_hints,
+            speaker_count=cfg.speaker_count,
+            diarization_enabled=cfg.diarization_enabled,
         )
         await _send(
             session.ws,
@@ -416,13 +413,13 @@ async def _process_chunk_async(session: DiarizeSession, chunk_pcm: bytes, offset
                 "file_url": file_url,
             },
         )
-        task_data = await loop.run_in_executor(None, client.poll, task_id)
+        task_data = await asyncio.to_thread(client.poll, task_id)
         result_url = client.best_result_url(task_data)
         if not result_url:
             # SUCCESS_WITH_NO_VALID_FRAGMENT or no result - silent chunk, skip
             log.info("chunk %d: no valid speech, skipping", chunk_idx)
             return True
-        transcript = await loop.run_in_executor(None, client.fetch_transcript, result_url)
+        transcript = await asyncio.to_thread(client.fetch_transcript, result_url)
         sentences, speakers = parse_sentences(transcript)
         await _send(
             session.ws,
