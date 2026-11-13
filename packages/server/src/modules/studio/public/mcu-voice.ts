@@ -9,6 +9,7 @@ export interface McuVoiceChatTurnInput {
   transcript: string
   clientId?: string
   agentRuntime?: McuAgentRuntime
+  speechEnabled?: boolean
 }
 
 export interface McuVoiceDependencies {

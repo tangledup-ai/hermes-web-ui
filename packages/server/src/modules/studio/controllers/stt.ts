@@ -923,6 +923,7 @@ export async function mcuVoiceTurn(ctx: Context) {
         transcript,
         clientId,
         agentRuntime,
+        speechEnabled: ctx.get('x-hermes-mcu-speech-enabled') !== 'false',
       })
     } catch (error) {
       if (error instanceof SttNoSpeechDetectedError) {

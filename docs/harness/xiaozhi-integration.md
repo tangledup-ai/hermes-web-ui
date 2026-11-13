@@ -15,6 +15,13 @@ The endpoint checks the setup code and Device-Id; it returns WebSocket configura
 not firmware or Studio login credentials. Admin `/api/xiaozhi/status` exposes
 connection health and the setup URL. The Devices page displays these diagnostics.
 
+Set `ekkoLan: true` in that JSON for a compatible XiaoZhi firmware and gateway.
+The OTA response enables the device's standby WebSocket. Add the gateway's
+`studio.deviceCode` to **Connections → 小方盒**. The row's LAN status then follows
+the physical device's WebSocket handshake and disconnect. Configure button or
+automatic listening, idle timeout and Ekko or Hermes in the gateway configuration.
+The external relay requires an official relay registration.
+
 The OTA response and Devices page use the computer's current LAN address for the
 WebSocket endpoint. This keeps the gateway address current when Wi-Fi changes,
 without rewriting the private JSON file. When the computer's LAN address changes,
@@ -28,7 +35,10 @@ Do not reset all NVS or erase Wi-Fi credentials just to change the server addres
   Passing a Server object creates `127.0.0.1:[object Object]` and breaks voice turns.
 - MCU Ekko runs explicitly supply the profile's provider, model, and API mode.
 - Gateway automatic listening must detect the speech endpoint; manual mode still
-  waits for `listen.stop`. Silence alone must not create unbounded turns.
+  waits for `listen.stop`. Both modes have a 32-second gateway capture limit.
+- When an Agent finishes without speakable text or a pending background task,
+  the MCU receives a failure status. This lets the user distinguish a model
+  that produced only internal reasoning from a completed spoken turn.
 - Studio audio URLs may be relative; the gateway resolves them against Studio URL.
 - DashScope may return an HTTP OSS audio URL; download its HTTPS equivalent without
   forwarding the API key to OSS.

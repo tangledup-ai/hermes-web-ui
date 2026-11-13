@@ -164,6 +164,7 @@ interface McuVoiceChatTurnOptions {
   transcript: string
   clientId?: string
   agentRuntime?: McuAgentRuntime
+  speechEnabled?: boolean
 }
 
 interface McuAudioWaiter {
@@ -188,6 +189,7 @@ interface McuVoiceStreamState {
   sampleRate: number
   channels: number
   bitsPerSample: number
+  speechEnabled: boolean
   bytes: number
   chunks: Array<{ offset: number; chunk: Buffer; seq?: number; crc32?: number }>
   userToken: string
@@ -508,6 +510,7 @@ export class GlobalAgentServer {
     if (!expected) return false
     for (const socket of this.clients.values()) {
       const auth = socket.handshake.auth || {}
+      if (auth.devicePresence === 'reported' && socket.data.mcuDeviceConnected !== true) continue
       const raw = typeof auth.deviceCode === 'string'
         ? auth.deviceCode
         : typeof auth.device_code === 'string'
@@ -644,6 +647,7 @@ export class GlobalAgentServer {
         status: 'speaking',
         text: segmentText,
       }, { clientId: options.clientId })
+      if (options.speechEnabled === false) return
       const controller = this.registerMcuTtsAbortController(options.interactionId)
       const audioResult: Promise<McuSpeechSynthesisResult> = this.synthesizeMcuSpeech(
         segmentText,
@@ -828,6 +832,10 @@ export class GlobalAgentServer {
         }
       }
       flushCompletedAssistantMessage()
+      if (segmentIndex === 0 && backgroundPending === 0) {
+        fail('The agent returned no reply')
+        return
+      }
       ttsQueue
         .then(async () => {
           await Promise.all(playbackQueue)
@@ -947,6 +955,15 @@ export class GlobalAgentServer {
       .slice(0, 96) || randomUUID()
     const interactionId = `mcu-background-${suffix}`
     const options = { ...item.options, interactionId }
+    if (options.speechEnabled === false) {
+      this.emitMcuEvent({
+        type: 'interaction.status',
+        interactionId,
+        status: 'completed',
+        text: item.text,
+      }, { clientId: options.clientId })
+      return
+    }
     const segmenter = createMcuSpeechSegmenter()
     const segments = segmenter.pushDelta(item.text)
     const tail = segmenter.flush()
@@ -1420,10 +1437,16 @@ export class GlobalAgentServer {
   }
 
   private forwardMcuEvent(clientId: string, event: string, payload: unknown): void {
-    const body = isRecord(payload)
+    const body: Record<string, unknown> = isRecord(payload)
       ? { ...payload, type: typeof payload.type === 'string' && payload.type ? payload.type : event }
       : { type: event, payload }
     if (!this.authorizeMcuEvent(clientId, event, body)) return
+    if ((event === 'mcu.ready' || event === 'mcu.status') && typeof body.deviceConnected === 'boolean') {
+      const socket = this.clients.get(clientId)
+      if (socket?.handshake.auth?.devicePresence === 'reported') {
+        socket.data.mcuDeviceConnected = body.deviceConnected
+      }
+    }
     this.handleMcuClientEvent(clientId, event, body)
     this.emitFrontendBridgeEvent(clientId, this.redactMcuAuthPayload(body))
   }
@@ -1820,6 +1843,7 @@ export class GlobalAgentServer {
       sampleRate: Number.isFinite(Number(payload.sampleRate)) ? Number(payload.sampleRate) : MCU_TTS_SAMPLE_RATE,
       channels: Number(payload.channels) === 1 ? 1 : 2,
       bitsPerSample: Number(payload.bitsPerSample) === 16 ? 16 : 16,
+      speechEnabled: payload.speechEnabled !== false,
       bytes: 0,
       chunks: [],
       userToken,
@@ -2033,6 +2057,7 @@ export class GlobalAgentServer {
           'X-Hermes-Mcu-Interaction-Id': stream.interactionId,
           'X-Hermes-Mcu-Device-Id': clientId,
           'X-Hermes-Mcu-Agent-Runtime': stream.agentRuntime,
+          'X-Hermes-Mcu-Speech-Enabled': String(stream.speechEnabled),
           'X-Hermes-Profile': stream.profile,
         },
         body: new Uint8Array(wav),
@@ -2045,12 +2070,14 @@ export class GlobalAgentServer {
         body = { error: text }
       }
       if (!response.ok || body.ok === false) {
-        if (body.ok === false && await this.enqueuePromptAudioFromVoiceTurn(clientId, stream.interactionId, body)) return
+        if (body.ok === false && stream.speechEnabled && await this.enqueuePromptAudioFromVoiceTurn(clientId, stream.interactionId, body)) return
         this.emitMcuEvent({
           type: 'interaction.status',
           interactionId: stream.interactionId,
           status: 'failed',
-          text: typeof body.error === 'string' ? body.error : `voice turn failed: ${response.status}`,
+          text: typeof body.error === 'string' ? body.error
+            : isRecord(body.audio) && typeof body.audio.text === 'string' ? body.audio.text
+              : `voice turn failed: ${response.status}`,
         }, { clientId })
       }
     } catch (err) {

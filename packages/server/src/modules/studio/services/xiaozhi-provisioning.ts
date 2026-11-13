@@ -4,7 +4,7 @@ import { isIP } from 'node:net'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
 import { join } from 'node:path'
 import { config, getWebUiHome } from '../public/config'
-interface DeviceConfig { deviceId: string; deviceIds?: string[]; setupCode: string; websocketUrl: string; deviceToken: string; gatewayMcpToken?: string }
+interface DeviceConfig { deviceId: string; deviceIds?: string[]; setupCode: string; websocketUrl: string; deviceToken: string; gatewayMcpToken?: string; ekkoLan?: boolean }
 
 type Interfaces = Record<string, NetworkInterfaceInfo[] | undefined>
 
@@ -51,7 +51,15 @@ export async function getXiaozhiProvisioning(deviceId: string, code: string, loc
   if (!c || ![c.deviceId, ...(c.deviceIds || [])].some(id => id.toLowerCase() === deviceId.toLowerCase())) return null
   const expected = Buffer.from(c.setupCode), supplied = Buffer.from(code)
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) return null
-  return { websocket: { url: currentWebsocketUrl(c, localAddress, requestHost), token: c.deviceToken, version: 1 }, server_time: { timestamp: Date.now() } }
+  return {
+    websocket: {
+      url: currentWebsocketUrl(c, localAddress, requestHost),
+      token: c.deviceToken,
+      version: 1,
+      ...(c.ekkoLan === true ? { ekko_lan: 1 } : {}),
+    },
+    server_time: { timestamp: Date.now() },
+  }
 }
 export async function getXiaozhiStatus(localAddress?: string, requestHost?: string) {
   const c = await readXiaozhiConfig()
