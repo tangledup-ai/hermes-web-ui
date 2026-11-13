@@ -140,6 +140,20 @@ function allowsServerTokenPath(path: string): boolean {
     path.startsWith('/api/studio/voice/proxy/')
 }
 
+const DEVICE_MEETING_STORAGE_PATH = /^\/api\/studio\/meeting-storage\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/(transcript|audio))?$/i
+
+function allowsNativeMeetingToken(ctx: Context, token: string): boolean {
+  // Trust the TCP peer and the native client's header, never a forwarded IP or URL token.
+  const address = ctx.req.socket.remoteAddress || ''
+  if (ctx.headers.origin !== undefined || ctx.headers.authorization !== `Bearer ${token}`
+    || (address !== '::1' && !/^(?:::ffff:)?127\./.test(address))) return false
+
+  if (ctx.path === '/api/studio/meeting-asr/start') return ctx.method === 'POST'
+  if (ctx.path === '/api/studio/meeting-asr/status') return ctx.method === 'GET'
+  const storage = DEVICE_MEETING_STORAGE_PATH.exec(ctx.path)
+  return !!storage && ctx.method === (storage[1]?.toLowerCase() === 'audio' ? 'POST' : 'PUT')
+}
+
 function isLoopbackRequest(ctx: Context): boolean {
   const ip = String(ctx.ip || ctx.request.ip || '').trim()
   const remote = String(ctx.req.socket.remoteAddress || '').trim()
@@ -153,10 +167,11 @@ function isLoopbackRequest(ctx: Context): boolean {
 }
 
 async function allowServerTokenForAgentEndpoint(ctx: Context, token: string): Promise<boolean> {
-  if (!token || !allowsServerTokenPath(ctx.path)) return false
-  if (!isLoopbackRequest(ctx)) return false
+  if (!token) return false
+  if (!(allowsServerTokenPath(ctx.path) && isLoopbackRequest(ctx))
+    && !allowsNativeMeetingToken(ctx, token)) return false
   const serverToken = await getToken()
-  if (token !== serverToken) return false
+  if (!safeEqual(token, serverToken)) return false
   ctx.state.serverTokenAuth = true
   return true
 }

@@ -15,9 +15,9 @@ import { checkPortAvailable, pickFreePort } from '../../packages/server/src/modu
 
 const servers: Server[] = []
 
-async function occupy(): Promise<number> {
+async function occupy(host = '127.0.0.1'): Promise<number> {
   const srv = createServer()
-  await new Promise<void>((resolve) => srv.listen(0, '0.0.0.0', resolve))
+  await new Promise<void>((resolve) => srv.listen(0, host, resolve))
   servers.push(srv)
   return (srv.address() as AddressInfo).port
 }
@@ -34,6 +34,11 @@ describe('ASR backend port selection', () => {
     const free = await pickFreePort(taken + 1)
     expect(await checkPortAvailable(free)).toBe(true)
     expect(free).toBeGreaterThan(taken)
+  })
+
+  it('skips a port occupied by an older wildcard listener', async () => {
+    const taken = await occupy('0.0.0.0')
+    expect(await checkPortAvailable(taken)).toBe(false)
   })
 
   it('returns the requested port when it is free', async () => {

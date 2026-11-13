@@ -4,6 +4,7 @@ import http from 'node:http'
 import https from 'node:https'
 import { meetingASRService } from '../services/meeting-asr/index'
 import { REPORT_FALLBACK_MARKER } from '../services/meeting-asr/realtime-assist'
+import { ensureRealtimeBackendReady } from '../services/realtime-backend'
 import { logger } from '../public/logging'
 import { userCanAccessProfile } from '../public/users'
 
@@ -129,6 +130,15 @@ async function proxyToBackend(ctx: Context, path: string, method: 'GET' | 'POST'
 // Service lifecycle
 export async function startASRService(ctx: Context): Promise<void> {
   try {
+    if (ctx.state.serverTokenAuth) {
+      // The native client can start the managed runtime using stored settings.
+      // Process paths, provider credentials and other overrides belong to the Web UI.
+      await ensureRealtimeBackendReady()
+      await meetingASRService.ensureDashScopeKeyPushed()
+      ctx.body = { status: 'started', ...meetingASRService.status }
+      return
+    }
+
     const config = ctx.request.body as any || {}
 
     // If no API key provided, check if we have it in stored config

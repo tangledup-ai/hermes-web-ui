@@ -13,6 +13,8 @@ import { logger } from '../../public/logging'
 import * as venvManager from './venv-manager'
 import * as dashscopeKeyStore from './dashscope-key-store'
 
+const BACKEND_HOST = '127.0.0.1'
+
 export interface MeetingASRConfig {
   /**
    * ASR provider selection: `'dashscope'` (default — Paraformer/Fun-ASR
@@ -47,7 +49,6 @@ export interface MeetingASRConfig {
   llmBaseUrl?: string
   llmModel?: string
   dataDir?: string
-  host?: string
   asrPort?: number
   diarizePort?: number
   ossBucket?: string
@@ -471,7 +472,7 @@ export class MeetingASRService extends EventEmitter {
       const env: Record<string, string> = {
         ...process.env,
         DATA_DIR: dataDir,
-        BACKEND_HOST: config.host || '0.0.0.0',
+        BACKEND_HOST,
         BACKEND_PORT: String(this._asrPort),
         DIARIZE_PORT: String(this._diarizePort),
         CORS_ORIGIN: `http://localhost:${process.env.PORT || 6060}`,
@@ -566,7 +567,7 @@ export class MeetingASRService extends EventEmitter {
       this.emit('phase', this._startupPhase)
       logger.info('[meeting-asr] Starting main ASR service on port %d...', this._asrPort)
       const mainUvicornArgs = [
-        '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', String(this._asrPort),
+        '-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', String(this._asrPort),
         ...this._uvicornTlsArgs(),
       ]
       this._mainLogTail = []
@@ -614,7 +615,7 @@ export class MeetingASRService extends EventEmitter {
       // Start diarize process
       logger.info('[meeting-asr] Starting diarize service on port %d...', this._diarizePort)
       const diarizeUvicornArgs = [
-        '-m', 'uvicorn', 'app.diarize_server:app', '--host', '0.0.0.0', '--port', String(this._diarizePort),
+        '-m', 'uvicorn', 'app.diarize_server:app', '--host', BACKEND_HOST, '--port', String(this._diarizePort),
         ...this._uvicornTlsArgs(),
       ]
       this.diarizeProcess = spawn(pythonPath, diarizeUvicornArgs, {
@@ -1029,8 +1030,7 @@ export class MeetingASRService extends EventEmitter {
 export const meetingASRService = MeetingASRService.getInstance()
 
 /**
- * True when nothing is listening on `port` (probed on 0.0.0.0 to match the
- * `--host 0.0.0.0` uvicorn bind). Exported for tests.
+ * True when the managed Python backend can bind to `port` on loopback.
  */
 export function checkPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -1043,7 +1043,7 @@ export function checkPortAvailable(port: number): Promise<boolean> {
     }
     srv.once('error', () => finish(false))
     srv.once('listening', () => srv.close(() => finish(true)))
-    srv.listen(port, '0.0.0.0')
+    srv.listen(port, BACKEND_HOST)
   })
 }
 
