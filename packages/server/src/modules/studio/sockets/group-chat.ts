@@ -3524,6 +3524,9 @@ export class GroupChatServer {
         const servers = Array.isArray(httpServers) ? httpServers : [httpServers]
 
         this.io = new Server(servers[0], {
+            // Bootstrap owns other upgrade paths, including the voice proxy
+            // which may wait for the ASR child to start before replying.
+            destroyUpgrade: false,
             cors: { origin: createSocketIoCorsOrigin(config.corsOrigins) },
             maxHttpBufferSize: 2_000_000,
             allowRequest: (req, callback) => {
