@@ -76,6 +76,8 @@ describe('meeting Ekko runtime', () => {
       messages: [expect.objectContaining({ role: 'system', content: expect.stringContaining('Meeting profile skill instructions') }),
         { role: 'user', content: expect.stringContaining(transcript) }],
     })
+    expect(JSON.parse(init.body).messages[0].content).toContain('## 待办事项')
+    expect(JSON.parse(init.body).messages[0].content).toContain('[00:27](#meeting-source-9)')
     expect(JSON.parse(init.body).tools).toBeUndefined()
   })
 

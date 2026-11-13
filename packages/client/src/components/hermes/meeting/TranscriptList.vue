@@ -11,6 +11,7 @@
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NPopover, NInput, NButton } from 'naive-ui'
+import { formatMeetingOffset } from '@/utils/meeting-time'
 import type { TranscriptSentence } from '@/stores/hermes/meeting'
 
 const props = defineProps<{
@@ -18,6 +19,7 @@ const props = defineProps<{
   partialText: string
   highlightedIndex: number
   isRecording: boolean
+  hasAudio?: boolean
   hideSpeakerDiarization: boolean
 }>()
 
@@ -27,6 +29,9 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+function canSeek(sentence: TranscriptSentence) {
+  return props.hasAudio !== false && sentence.startTime !== undefined && !props.isRecording
+}
 
 const renamingKey = ref<string | null>(null) // `${speakerId}:${index}`
 const renameInput = ref('')
@@ -71,14 +76,22 @@ function confirmRename() {
       v-for="(sentence, index) in props.sentences"
       :key="index"
       :data-index="index"
+      tabindex="-1"
       class="sentence-item"
       :class="{
         highlighted: props.highlightedIndex === index,
-        clickable: sentence.startTime && !props.isRecording,
+        clickable: canSeek(sentence),
       }"
-      @click="sentence.startTime && !props.isRecording ? emit('seek', index) : undefined"
+      @click="canSeek(sentence) ? emit('seek', index) : undefined"
     >
-      <span class="sentence-index">{{ index + 1 }}</span>
+      <button
+        v-if="canSeek(sentence) && sentence.startTime !== undefined"
+        class="sentence-time"
+        type="button"
+        :aria-label="t('meeting.deviceMarker', { time: formatMeetingOffset(sentence.startTime) })"
+        @click.stop="emit('seek', index)"
+      >{{ formatMeetingOffset(sentence.startTime) }}</button>
+      <span v-else class="sentence-time" aria-hidden="true">{{ sentence.startTime === undefined ? '—' : formatMeetingOffset(sentence.startTime) }}</span>
       <div class="sentence-body">
         <NPopover
           v-if="sentence.speakerId && !props.hideSpeakerDiarization"
@@ -133,7 +146,7 @@ function confirmRename() {
 .transcript-content {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 12px clamp(16px, 4vw, 42px);
 }
 
 .empty-state {
@@ -152,8 +165,8 @@ function confirmRename() {
 
 .sentence-item {
   display: flex;
-  gap: 12px;
-  padding: 8px;
+  gap: 18px;
+  padding: 13px 0;
   border-bottom: 1px solid rgba($border-color, 0.5);
   border-radius: 4px;
   transition: background-color 0.2s ease;
@@ -176,18 +189,22 @@ function confirmRename() {
   }
 }
 
-.sentence-index {
+.sentence-time {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba($accent-primary, 0.1);
-  color: $accent-primary;
-  border-radius: 50%;
-  font-size: 11px;
-  font-weight: 600;
+  min-width: 54px;
+  align-self: flex-start;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: $text-secondary;
+  text-align: left;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+button.sentence-time {
+  cursor: pointer;
+  &:hover { color: $accent-primary; }
 }
 
 .sentence-body {
@@ -228,8 +245,9 @@ function confirmRename() {
 }
 
 .sentence-text {
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 16px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
 }
 
 .speaker-rename-popover {

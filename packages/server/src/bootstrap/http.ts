@@ -9,6 +9,7 @@ import { startUSBService, stopUSBService } from '../modules/studio/services/usb'
 import { USBSocketServer } from '../modules/studio/services/usb/USBSocketServer'
 import { installGradingSocket } from '../modules/studio/services/grading/client-requests'
 import { meetingASRService } from '../modules/studio/services/meeting-asr'
+import { deviceMeetingLiveService } from '../modules/studio/services/meeting-asr/device-live'
 import { realtimeAssistService } from '../modules/studio/services/meeting-asr/realtime-assist'
 import { startReconcileLoop, stopReconcileLoop } from './update'
 import { MEETING_WEBSOCKET_PATHS, setupMeetingWebSocketProxy } from './meeting-websocket'
@@ -729,8 +730,13 @@ export async function bootstrap() {
   usbSocketServer.init()
   startUSBService()
   realtimeAssistService.init(activeGroupChatServer.getIO())
+  deviceMeetingLiveService.init(activeGroupChatServer.getIO())
   additionalShutdownSteps.push({ name: 'USB monitor', close: async () => { usbSocketServer.close(); await stopUSBService() } })
-  additionalShutdownSteps.push({ name: 'Meeting ASR', close: async () => { realtimeAssistService.stopAllSessions(); await meetingASRService.stop() } })
+  additionalShutdownSteps.push({ name: 'Meeting ASR', close: async () => {
+    deviceMeetingLiveService.close()
+    realtimeAssistService.stopAllSessions()
+    await meetingASRService.stop()
+  } })
   setupMeetingWebSocketProxy(servers)
   getLanPeerSocketManager().setupServer(servers)
   additionalShutdownSteps.push({ name: 'LAN peer tools', close: () => getLanPeerSocketManager().close() })

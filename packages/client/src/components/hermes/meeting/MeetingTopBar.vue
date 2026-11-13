@@ -26,6 +26,8 @@ const props = defineProps<{
   speakerCountOptions: SpeakerCountOption[]
   isRecording: boolean
   hasSentences: boolean
+  hasMeeting?: boolean
+  canClear?: boolean
   hideSpeakerDiarization: boolean
 }>()
 
@@ -66,7 +68,7 @@ function onSpeakerCountUpdate(value: number | null) {
 
     <div class="meeting-controls">
       <!-- Agent 切换 -->
-      <NTooltip trigger="hover">
+      <NTooltip v-if="props.hasMeeting !== false" trigger="hover">
         <template #trigger>
           <NButton
             size="small"
@@ -86,7 +88,7 @@ function onSpeakerCountUpdate(value: number | null) {
       </NTooltip>
 
       <!-- 导出会议文字（ASR 逐字稿 Markdown） -->
-      <NTooltip trigger="hover">
+      <NTooltip v-if="props.hasMeeting !== false" trigger="hover">
         <template #trigger>
           <NButton
             size="small"
@@ -165,7 +167,7 @@ function onSpeakerCountUpdate(value: number | null) {
       </template>
 
       <!-- 清空转写 -->
-      <NTooltip trigger="hover">
+      <NTooltip v-if="props.hasMeeting !== false && props.canClear !== false" trigger="hover">
         <template #trigger>
           <NButton
             size="small"

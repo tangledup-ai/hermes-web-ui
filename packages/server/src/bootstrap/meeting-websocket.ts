@@ -8,6 +8,7 @@ import { logger } from '../modules/studio/public/logging'
 import { parseUpgradeRequestUrl, shouldRejectUpgradeOrigin, writeForbiddenOrigin } from '../modules/studio/middleware/security'
 import { MeetingProfileError, resolveMeetingProfile } from '../modules/studio/services/meeting-asr/profile'
 import { DEVICE_SOURCE_HEADER, isH618MeetingSource, trackDeviceTranscription } from '../modules/studio/services/meeting-asr/device-consent'
+import { bridgeDeviceMeetingWebSocket } from './meeting-device-websocket'
 import {
   meetingTranscriptionRequestContext,
   TRANSCRIPTION_CONTEXT_HEADER,
@@ -82,6 +83,12 @@ export function setupMeetingWebSocketProxy(servers: http.Server[]): void {
       if (socket.destroyed) return
       // Do not send browser credentials to the Python child or its access log.
       upgradeUrl.searchParams.delete('token')
+      const meetingId = h618 ? upgradeUrl.searchParams.get('meetingId') : null
+      const startedAt = h618 ? upgradeUrl.searchParams.get('startedAt') : null
+      if (h618) {
+        upgradeUrl.searchParams.delete('meetingId')
+        upgradeUrl.searchParams.delete('startedAt')
+      }
       const upstreamPath = upgradeUrl.pathname + upgradeUrl.search
 
       const upgradeTimer = setTimeout(() => socket.destroy(), 65_000)
@@ -127,6 +134,14 @@ export function setupMeetingWebSocketProxy(servers: http.Server[]): void {
           const targetPort = pathname === '/ws/diarize' ? meetingASRService.getDiarizePort() : meetingASRService.getASRPort()
           if (!targetPort) {
             socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
+            return
+          }
+          if (h618 && user) {
+            clearTimeout(upgradeTimer)
+            bridgeDeviceMeetingWebSocket({
+              req, socket, head, upstreamPath, targetPort, useTls: meetingASRService.useTls, contextHeaders: headers,
+              account: { userId: user.id, profile }, meetingId, startedAt,
+            })
             return
           }
           if (meetingASRService.useTls) {

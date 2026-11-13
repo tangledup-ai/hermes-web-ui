@@ -5,7 +5,7 @@ import { logger } from '../../public/logging'
 import { streamConfiguredMeetingModel, type MeetingModelRequest, type MeetingModelTarget } from '../../public/meeting-runtime'
 import { readSseFrames } from '../chat-run/sse-utils'
 import type { SceneTemplate } from './scene-templates'
-import { REPORT_TITLE_INSTRUCTION } from './scene-templates'
+import { REPORT_TITLE_INSTRUCTION, REPORT_TRANSCRIPT_INSTRUCTION } from './scene-templates'
 import { prepareAnalysisSkillSection } from './skill-resolver'
 import { parseAnalysisRound, type AnalysisRound, type SpeechContext } from './report-parser'
 
@@ -255,7 +255,8 @@ export async function* streamMeetingModelReport(
   const stream = await resolveMeetingModel({
     ...target,
     purpose: 'meeting-report',
-    systemPrompt: [template.reportPrompt, skillSection, REPORT_TITLE_INSTRUCTION].filter(Boolean).join('\n\n'),
+    systemPrompt: [template.reportPrompt, skillSection, REPORT_TITLE_INSTRUCTION, REPORT_TRANSCRIPT_INSTRUCTION]
+      .filter(Boolean).join('\n\n'),
     userPrompt: `以下是完整的会议转写内容：\n\n${transcript}`,
     temperature: 0.4,
     maxTokens: 4000,

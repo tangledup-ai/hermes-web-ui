@@ -40,10 +40,17 @@ export function useReportStream(deps: UseReportStreamDeps) {
     const profile = agent.profile || getActiveProfileName()
 
     // 记住最近一次的 transcript，让 retry 按钮可以直接复用而不需要父组件再发一次。
+    const previousReport = reportMarkdown.value
     lastTranscript.value = transcript
     isGeneratingReport.value = true
     reportError.value = null
     reportMarkdown.value = ''
+    let pendingMarkdown = ''
+    let renderTimer: ReturnType<typeof setTimeout> | undefined
+    const flushReport = () => {
+      renderTimer = undefined
+      reportMarkdown.value = pendingMarkdown
+    }
 
     try {
       const response = await fetch(`${getBaseUrl()}/api/studio/meeting-asr/report/stream`, {
@@ -108,10 +115,16 @@ export function useReportStream(deps: UseReportStreamDeps) {
             // 再让后续 { text } 帧正常续写到空容器里。结果：用户看到的是一份连贯的 LLM 输出。
             if (chunk.fallback === true) {
               console.info('[report] agent path fell back to direct LLM; discarding partial content')
+              clearTimeout(renderTimer)
+              renderTimer = undefined
+              pendingMarkdown = ''
               reportMarkdown.value = ''
               continue
             }
-            if (chunk.text) reportMarkdown.value += chunk.text
+            if (typeof chunk.text === 'string' && chunk.text) {
+              pendingMarkdown += chunk.text
+              renderTimer ??= setTimeout(flushReport, 80)
+            }
           } catch (e) {
             if (e instanceof SyntaxError) continue
             throw e
@@ -123,21 +136,26 @@ export function useReportStream(deps: UseReportStreamDeps) {
         }
       }
 
-      if (!sawDoneFrame || !reportMarkdown.value.trim()) {
+      if (!sawDoneFrame || !pendingMarkdown.trim()) {
         throw new Error('Report stream ended unexpectedly')
       }
 
-      if (!signal.aborted) deps.onReportGenerated?.(reportMarkdown.value)
+      if (!signal.aborted) {
+        reportMarkdown.value = pendingMarkdown
+        deps.onReportGenerated?.(pendingMarkdown)
+      }
     } catch (err) {
       if (signal.aborted) return
       // 之前直接展示 raw provider error 字符串（"Provider returned an empty stream with
       // no finish_reason" 等），既不可读也没给用户任何可操作路径。这里用 classifyReportError
       // 归一化到 i18n key，组件只负责 t(...)；匹配规则在 report-error.ts 里可单测。
       const rawMessage = err instanceof Error ? err.message : String(err)
+      reportMarkdown.value = previousReport
       reportError.value = t(classifyReportError(rawMessage))
       // raw 错误仍然打 console 方便排查，但不展示给用户。
       console.error('[report] generation failed:', rawMessage)
     } finally {
+      clearTimeout(renderTimer)
       controller = undefined
       isGeneratingReport.value = false
     }

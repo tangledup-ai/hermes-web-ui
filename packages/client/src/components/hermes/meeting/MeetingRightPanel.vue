@@ -63,7 +63,7 @@ const panelTitle = computed(() => {
 
 <template>
   <aside
-    v-if="props.visible"
+    v-show="props.visible"
     class="right-panel"
     :style="props.resizeStyle"
   >
@@ -134,11 +134,13 @@ const panelTitle = computed(() => {
       <template v-else-if="props.isInterviewScene">
         <slot name="interview" />
       </template>
-      <template v-else-if="props.showAgentPanel">
-        <slot name="agent" />
-      </template>
       <template v-else>
-        <slot name="analysis" />
+        <div v-show="props.showAgentPanel" class="right-panel-pane">
+          <slot name="agent" />
+        </div>
+        <div v-if="!props.showAgentPanel" class="right-panel-pane">
+          <slot name="analysis" />
+        </div>
       </template>
     </div>
   </aside>
@@ -226,6 +228,13 @@ const panelTitle = computed(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.right-panel-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .right-panel-header {

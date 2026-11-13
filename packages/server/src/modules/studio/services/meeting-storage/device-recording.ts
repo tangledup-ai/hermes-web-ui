@@ -150,8 +150,10 @@ export async function finishDeviceRecording(
     if (!owner?.pending) {
       const receipt = await readJson<Receipt>(complete, 'receipt.json')
       if (!receipt || receipt.key !== key) throw new DeviceRecordingError('upload_key_conflict', 409)
-      return { meetingId: id, bytes: receipt.bytes, sha256: receipt.sha256, reused: true }
+      return { meetingId: id, bytes: receipt.bytes, sha256: receipt.sha256, reused: true as const }
     }
+    const metadata = await readJson<MeetingData>(pending, 'metadata.json')
+    if (!metadata) throw new DeviceRecordingError('device_metadata_required', 409)
     const transcript = await readJson<TranscriptSentence[]>(pending, 'transcript.json')
     if (!transcript) throw new DeviceRecordingError('device_transcript_required', 409)
 
@@ -178,7 +180,7 @@ export async function finishDeviceRecording(
       await writeJson(pending, 'receipt.json', { key, bytes, sha256 })
       await fs.mkdir(meetings, { recursive: true })
       await fs.rename(pending, complete)
-      return { meetingId: id, bytes, sha256, reused: false }
+      return { meetingId: id, bytes, sha256, reused: false as const, startedAt: metadata.createdAt }
     } finally {
       await handle.close().catch(() => {})
       await fs.unlink(tmp).catch(() => {})

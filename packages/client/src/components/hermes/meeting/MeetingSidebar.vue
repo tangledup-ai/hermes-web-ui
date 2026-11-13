@@ -20,8 +20,8 @@ import PageSidebarFooter from '@/components/layout/PageSidebarFooter.vue'
 export interface SidebarSession {
   id: string
   title: string
+  source?: 'h618'
   updatedAt: number
-  sentencesCount: number
   hasAnalysis: boolean
 }
 
@@ -29,6 +29,7 @@ const props = defineProps<{
   expanded: boolean
   sessions: SidebarSession[]
   activeId: string | null
+  selectionDisabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -37,7 +38,7 @@ const emit = defineEmits<{
   (e: 'select', sessionId: string): void
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 function close() {
   emit('update:expanded', false)
@@ -52,13 +53,13 @@ function onSelect(id: string) {
 }
 
 function formatMeta(s: SidebarSession): string {
-  const date = new Date(s.updatedAt).toLocaleString('zh-CN', {
+  const date = new Date(s.updatedAt).toLocaleString(locale.value, {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
   })
-  return `${date} · ${s.sentencesCount} ${t('meeting.sentences')}`
+  return `${date} · ${t(s.source === 'h618' ? 'meeting.workspace.device' : 'meeting.workspace.web')}`
 }
 </script>
 
@@ -83,15 +84,20 @@ function formatMeta(s: SidebarSession): string {
         >
           {{ t('meeting.noMeetings') }}
         </div>
-        <button
+        <div
           v-for="session in props.sessions"
           :key="session.id"
-          type="button"
           class="meeting-list-item"
           :class="{ active: session.id === props.activeId }"
-          @click="onSelect(session.id)"
         >
-          <div class="meeting-item-icon">
+          <button
+            class="meeting-item-select"
+            type="button"
+            :disabled="selectionDisabled"
+            :aria-current="session.id === props.activeId ? 'true' : undefined"
+            @click="onSelect(session.id)"
+          >
+          <div class="meeting-item-icon" aria-hidden="true">
             <svg
               width="16"
               height="16"
@@ -111,12 +117,13 @@ function formatMeta(s: SidebarSession): string {
               <span v-if="session.hasAnalysis" class="meeting-item-badge">AI</span>
             </div>
           </div>
+          </button>
           <!-- 删除动作通过 slot 注入，父级包 NPopconfirm 提供二次确认 -->
           <slot
             name="item-actions"
             :session="session"
           />
-        </button>
+        </div>
       </div>
     </div>
     <PageSidebarFooter v-if="props.expanded" />
@@ -124,6 +131,22 @@ function formatMeta(s: SidebarSession): string {
 </template>
 
 <style scoped lang="scss">
+.meeting-item-select {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+
+  &:disabled { cursor: default; }
+  &:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+}
+
 /* 列表项内层样式（颜色直接走主题变量，dark/comic 自动适配）*/
 .meeting-item-title {
   font-size: 13px;

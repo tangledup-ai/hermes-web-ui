@@ -33,6 +33,8 @@ it('keeps staged meetings hidden, checks owner for all access, and publishes onl
   vi.stubEnv('MEETING_AUDIO_MAX_BYTES', '18')
   const { meetingStorageRoutes } = await import('../../packages/server/src/modules/studio/routes/meeting-storage')
   const { meetingStorageService } = await import('../../packages/server/src/modules/studio/services/meeting-storage')
+  const { deviceMeetingLiveService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/device-live')
+  const saved = vi.spyOn(deviceMeetingLiveService, 'saved')
   const app = new Koa()
   app.use(createRequestBodyParser())
   app.use(async (ctx, next) => {
@@ -84,12 +86,14 @@ it('keeps staged meetings hidden, checks owner for all access, and publishes onl
     expect((await audio('')).status).toBe(400)
     expect((await audio('too large'.repeat(8))).status).toBe(413)
     expect(await list()).toEqual({ meetings: [] })
+    expect(saved).not.toHaveBeenCalled()
 
     const first = await audio('example')
     expect(first.status).toBe(200)
     const expected = { status: 'ok', meetingId: id, bytes: 7, sha256: createHash('sha256').update('example').digest('hex') }
     expect(await first.json()).toEqual({ ...expected, reused: false })
     expect(await audio('different').then(response => response.json())).toEqual({ ...expected, reused: true })
+    expect(saved).toHaveBeenCalledExactlyOnceWith({ userId: 1, profile: 'default' }, id, 1234)
     expect((await audio('different', 'other-key')).status).toBe(409)
     expect(await list()).toEqual({ meetings: [id] })
     expect(await list({ ...headers, 'X-Hermes-Profile': 'work' })).toEqual({ meetings: [] })
@@ -138,6 +142,8 @@ it('keeps staged meetings hidden, checks owner for all access, and publishes onl
     expect(await fetch(`${base}/${raceId}`, { headers }).then(response => response.json()))
       .toMatchObject({ id: raceId, title: 'Legacy' })
   } finally {
+    saved.mockRestore()
+    deviceMeetingLiveService.close()
     await new Promise<void>(resolve => server.close(() => resolve()))
     await rm(home, { recursive: true, force: true })
   }

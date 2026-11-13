@@ -74,15 +74,23 @@ test('meeting, USB and LAN/Xiaozhi screens remain reachable on the migrated clie
   await expect(page.getByText('No devices found')).toBeVisible()
 })
 
-test('meeting recording loads the static worklet and sends authenticated 16 kHz PCM', async ({ page }) => {
+test('web recording sends 16 kHz PCM and saves the audio and transcript tail', async ({ page }) => {
   const binaryFrames: Buffer[] = []
+  const audioUploads: string[] = []
+  const reportInputs: string[] = []
   let authenticated = false
   let profile: string | null = null
   await page.routeWebSocket(url => url.pathname === '/ws/asr', ws => {
     const query = new URL(ws.url()).searchParams
     authenticated = !!query.get('token')
     profile = query.get('profile')
-    ws.onMessage(data => { if (Buffer.isBuffer(data)) binaryFrames.push(data) })
+    ws.onMessage(data => {
+      if (Buffer.isBuffer(data)) binaryFrames.push(data)
+      else if (JSON.parse(data).type === 'stop') setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'final', text: 'Final checklist approved.', begin_time: 2700, end_time: 3200 }))
+        ws.send(JSON.stringify({ type: 'stopped' }))
+      }, 650)
+    })
   })
   await page.addInitScript(() => {
     localStorage.setItem('hermes.meeting.asrConfig', JSON.stringify({ dashscopeApiKey: 'fixture-only' }))
@@ -109,15 +117,33 @@ test('meeting recording loads the static worklet and sends authenticated 16 kHz 
         } })
       }
     } })
-    Object.defineProperty(window, 'MediaRecorder', { value: class {
+    Object.defineProperty(window, 'MediaRecorder', { value: class extends EventTarget {
       state = 'inactive'
+      ondataavailable?: (e: { data: Blob }) => void
       start() { this.state = 'recording' }
-      stop() { this.state = 'inactive' }
+      stop() {
+        this.state = 'inactive'
+        setTimeout(() => {
+          this.ondataavailable?.({ data: new Blob(['webm tail']) })
+          this.dispatchEvent(new Event('stop'))
+        }, 50)
+      }
     } })
   })
 
   await open(page, '/hermes/meeting', '', false)
-  await page.getByRole('button', { name: 'New Meeting', exact: true }).click()
+  await page.route('**/api/studio/meeting-storage/*/audio', route => {
+    if (route.request().method() === 'POST') audioUploads.push(route.request().postData() || '')
+    return route.fulfill({ json: { status: 'ok' } })
+  })
+  await page.route('**/api/studio/meeting-asr/report/stream', route => {
+    reportInputs.push(route.request().postDataJSON().transcript)
+    return route.fulfill({
+      contentType: 'text/event-stream',
+      body: 'data: {"text":"# Launch checklist approved"}\n\ndata: [DONE]\n\n',
+    })
+  })
+  await page.locator('button.page-sidebar-primary[aria-label="New Meeting"]').click()
   await expect(page.getByRole('dialog')).toContainText('Ekko Agent')
   await expect(page.getByRole('dialog').locator('input[type=password]')).toHaveCount(0)
   await page.getByRole('button', { name: 'Create', exact: true }).click()
@@ -132,11 +158,16 @@ test('meeting recording loads the static worklet and sends authenticated 16 kHz 
   expect(binaryFrames[0].readInt16LE(0)).toBe(16383)
   expect(authenticated).toBe(true)
   expect(profile).toBe('default')
+  await page.getByRole('button', { name: 'Stop Recording', exact: true }).click()
+  await expect(page.getByText('Final checklist approved.', { exact: true })).toBeVisible()
+  await expect.poll(() => audioUploads).toEqual(['webm tail'])
+  await expect.poll(() => reportInputs).toEqual(['[1] [00:02] Final checklist approved.'])
 })
 
 test('uploaded audio is transcribed and sent to Ekko for a persisted report', async ({ page }) => {
   await open(page, '/hermes/meeting')
   const saved: Array<{ agentConfig?: object; htmlContent?: string }> = []
+  let reportAttempts = 0
   await page.route('**/api/studio/meeting-storage/meeting-*', route => {
     if (route.request().method() === 'PUT') saved.push(route.request().postDataJSON())
     return route.fulfill({ json: { status: 'ok' } })
@@ -156,27 +187,37 @@ test('uploaded audio is transcribed and sent to Ekko for a persisted report', as
   }))
   await page.route('**/api/studio/meeting-asr/report/stream', route => {
     expect(route.request().postDataJSON()).toMatchObject({
-      agentType: 'ekko', profile: 'default', transcript: 'Review the launch checklist.',
+      agentType: 'ekko', profile: 'default', transcript: '[1] [00:00] Review the launch checklist.',
     })
+    reportAttempts++
     return route.fulfill({
       contentType: 'text/event-stream',
-      body: `data: ${JSON.stringify({ text: '# Launch review\n\nChecklist accepted.' })}\n\ndata: [DONE]\n\n`,
+      body: reportAttempts === 1
+        ? `data: ${JSON.stringify({ text: '# Launch review\n\nChecklist accepted. [00:00](#meeting-source-1)' })}\n\ndata: [DONE]\n\n`
+        : 'data: {"text":"# Partial retry"}\n\ndata: {"error":{"message":"stream ended unexpectedly"}}\n\n',
     })
   })
 
-  await page.getByRole('button', { name: 'New Meeting', exact: true }).click()
+  await page.locator('button.page-sidebar-primary[aria-label="New Meeting"]').click()
   await page.getByRole('dialog').getByText('Direct audio transcription', { exact: true }).click()
   await page.getByRole('dialog').locator('input[type=file]').setInputFiles({
     name: 'meeting.wav', mimeType: 'audio/wav', buffer: Buffer.from('test audio'),
   })
   await page.getByRole('button', { name: 'Create', exact: true }).click()
   await expect(page.getByText('Review the launch checklist.', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Generate Report', exact: true }).click()
+  await page.getByRole('banner').getByRole('button', { name: 'Generate Report', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Launch review' })).toBeVisible()
   await expect.poll(() => saved.at(-1)).toMatchObject({
     agentConfig: { agentType: 'ekko', profile: 'default' },
-    htmlContent: '# Launch review\n\nChecklist accepted.',
+    htmlContent: '# Launch review\n\nChecklist accepted. [00:00](#meeting-source-1)',
   })
+  await page.getByRole('link', { name: '00:00', exact: true }).click()
+  await expect(page.locator('.sentence-item[data-index="0"]')).toHaveClass(/highlighted/)
+  await page.getByRole('button', { name: 'Agent Chat', exact: true }).click()
+  await page.locator('.report-action-bar').getByRole('button', { name: 'Generate Report', exact: true }).click()
+  await expect(page.locator('.report-error')).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Launch review' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Partial retry' })).toHaveCount(0)
 })
 
 test('enabled scanner, grading and knowledge pages load with upstream locale messages', async ({ page }) => {

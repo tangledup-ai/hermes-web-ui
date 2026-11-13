@@ -4,8 +4,10 @@ import { useI18n } from 'vue-i18n'
 import { useMeetingStore } from '@/stores/hermes/meeting'
 import type { TranscriptSentence } from '@/stores/hermes/meeting'
 import { meetingASRApi } from '@/utils/meeting-asr-api'
+import { formatTranscriptForReport } from '@/utils/meeting-report-transcript'
 import { meetingStorageApi } from '@/utils/meeting-storage-api'
 import { useMessage } from '@/composables/useAppMessage'
+import { getApiKey, getBaseUrl } from '@/api/client'
 
 export interface AsrServiceStatus {
   isRunning: boolean
@@ -40,6 +42,61 @@ export interface UseMeetingAudioDeps {
   sentences: Ref<TranscriptSentence[]>
 }
 
+function stopMediaRecorder(recorder: MediaRecorder | null): Promise<void> {
+  if (!recorder || recorder.state === 'inactive') return Promise.resolve()
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer)
+      recorder.removeEventListener('stop', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, 3_000)
+    recorder.addEventListener('stop', finish, { once: true })
+    try {
+      recorder.stop()
+    } catch {
+      finish()
+    }
+  })
+}
+
+function drainTranscription(socket: WebSocket | null, timeoutMs: number, signal: AbortSignal): Promise<void> {
+  if (!socket) return Promise.resolve()
+  socket.onopen = null
+  socket.onclose = null
+  if (signal.aborted || socket.readyState !== WebSocket.OPEN) {
+    socket.onmessage = null
+    socket.close()
+    return Promise.resolve()
+  }
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      socket.removeEventListener('message', onMessage)
+      socket.removeEventListener('close', finish)
+      socket.onmessage = null
+      socket.close()
+      resolve()
+    }
+    function onMessage(event: MessageEvent) {
+      if (typeof event.data !== 'string') return
+      try {
+        if (JSON.parse(event.data)?.type === 'stopped') finish()
+      } catch { /* Ignore unrelated frames while the server drains. */ }
+    }
+    const timer = setTimeout(finish, timeoutMs)
+    socket.addEventListener('message', onMessage)
+    socket.addEventListener('close', finish, { once: true })
+    signal.addEventListener('abort', finish, { once: true })
+    try {
+      socket.send(JSON.stringify({ type: 'stop' }))
+    } catch {
+      finish()
+    }
+  })
+}
+
 /**
  * 会议音频录制 + 播放的完整生命周期（拆分自 MeetingView.vue，行为保持一致）。
  *
@@ -67,12 +124,14 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
   // --- 录音会话状态 ---
   const isRecording = ref(false)
   const isConnecting = ref(false)
+  const isFinalizing = ref(false)
   const statusText = ref('')
   const errorMessage = ref('')
 
   // --- WebSocket & Audio ---
   let ws: WebSocket | null = null
   let diarizeWs: WebSocket | null = null  // 说话人分离专用WebSocket
+  let asrProvider: string | undefined
   let audioContext: AudioContext | null = null
   let mediaStream: MediaStream | null = null
   const analyser = ref<AnalyserNode | null>(null)
@@ -80,6 +139,9 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
   // --- ASR WebSocket 重连机制 ---
   // 区分用户主动停止（stopRecording）与异常断开（网络/Python 进程崩溃）
   let cleanStop = false
+  let pendingStop: Promise<void> | undefined
+  let recordingScope: AbortController | undefined
+  let isRecordingScopeCurrent = () => false
   let reconnectAttempts = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   const MAX_RECONNECT_ATTEMPTS = 3
@@ -136,7 +198,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
     const backup = () => {
       const sessionId = meetingStore.activeSessionId
-      if (!isRecording.value || !sessionId || audioChunks.value.length === 0) return
+      if ((!isRecording.value && !isFinalizing.value) || !sessionId || audioChunks.value.length === 0) return
       try {
         const blob = new Blob(audioChunks.value, { type: 'audio/webm' })
         meetingStore.saveAudioData(sessionId, blob)
@@ -191,9 +253,29 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     }
   }
 
+  function transcriptionMessageHandler(source: 'asr' | 'diarize', meetingId: string, offset = () => 0) {
+    const scope = isRecordingScopeCurrent
+    return (event: MessageEvent) => {
+      if (!scope() || meetingStore.activeSessionId !== meetingId) return
+      try {
+        const data = JSON.parse(event.data)
+        if (source === 'asr' && data?.type === 'ready') asrProvider = data.provider
+        if (source === 'asr' && data?.type === 'final') {
+          const offsetMs = offset()
+          if (typeof data.begin_time === 'number') data.begin_time += offsetMs
+          if (typeof data.end_time === 'number') data.end_time += offsetMs
+        }
+        deps.handleWsMessage(data, source)
+      } catch (error) {
+        console.error(`[meeting] Failed to handle ${source} message:`, error)
+      }
+    }
+  }
+
   // 尝试重连 ASR WebSocket（音频管线保持运行，仅重建 socket）
   async function tryReconnectASR() {
-    if (cleanStop || !isRecording.value || !recordingProfile) return
+    const meetingId = meetingStore.activeSessionId
+    if (cleanStop || !isRecording.value || !recordingProfile || !meetingId) return
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       console.warn('[meeting] ASR reconnect: max attempts reached, stopping recording')
       stopRecording()
@@ -206,12 +288,14 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     statusText.value = t('meeting.reconnecting')
 
     const profile = recordingProfile
+    const scope = isRecordingScopeCurrent
     reconnectTimer = setTimeout(async () => {
-      if (cleanStop || !isRecording.value) return
+      if (!scope() || cleanStop || !isRecording.value) return
 
       try {
         // 先确保服务端 ASR 进程仍在运行（可能因崩溃而不可用）
         const started = await deps.startASRService(profile)
+        if (!scope() || cleanStop || !isRecording.value || meetingId !== meetingStore.activeSessionId) return
         if (!started) {
           console.warn('[meeting] ASR reconnect: startASRService failed, will retry')
           // 继续重试，不立即放弃
@@ -219,23 +303,17 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           return
         }
 
-        if (cleanStop || !isRecording.value || profile !== recordingProfile) return
         ws = new WebSocket(meetingWebSocketUrl(ASR_URL, profile))
+        let offsetMs = 0
 
         ws.onopen = () => {
           console.log('[meeting] ASR WebSocket reconnected')
           reconnectAttempts = 0 // 重连成功，重置计数
+          offsetMs = Math.max(0, Date.now() - recordingStartTime.value)
           ws?.send(JSON.stringify({ type: 'start' }))
         }
 
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data)
-            deps.handleWsMessage(data, 'asr')
-          } catch (e) {
-            console.error('Failed to parse ASR WS message:', e)
-          }
-        }
+        ws.onmessage = transcriptionMessageHandler('asr', meetingId, () => offsetMs)
 
         ws.onerror = (error) => {
           console.error('[meeting] ASR reconnect WebSocket error:', error)
@@ -251,29 +329,41 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
         }
       } catch (err) {
         console.error('[meeting] ASR reconnect failed:', err)
-        tryReconnectASR()
+        if (scope()) tryReconnectASR()
       }
     }, delay)
   }
 
   // --- 音频处理 ---
   async function startRecording() {
+    if (isRecording.value || isConnecting.value || pendingStop) return
+    const meetingId = meetingStore.activeSessionId
     // 没有活动会议时，先引导用户新建会议
-    if (!meetingStore.activeSessionId) {
+    if (!meetingId) {
       deps.openCreateModal()
       return
     }
+    const scope = new AbortController()
+    recordingScope = scope
+    const profile = deps.getTranscriptionProfile()
+    const apiKey = getApiKey()
+    const baseUrl = getBaseUrl()
+    const isCurrent = () => !scope.signal.aborted && profile === deps.getTranscriptionProfile()
+      && apiKey === getApiKey() && baseUrl === getBaseUrl()
+    isRecordingScopeCurrent = isCurrent
 
     try {
       errorMessage.value = ''
       isConnecting.value = true
       statusText.value = t('meeting.connecting')
       cleanStop = false
+      asrProvider = undefined
       reconnectAttempts = 0
       clearReconnectTimer()
 
       // 第 1 阶段：麦克风检测
       const micCheck = await checkMicrophoneAvailability()
+      if (cleanStop || !isCurrent()) return
       if (!micCheck.available) {
         errorMessage.value = t(`meeting.${micCheck.reason}`)
         isConnecting.value = false
@@ -283,10 +373,9 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       // 检查并启动 ASR 服务（服务已运行时也会调用，确保 OSS 配置变更后重启进程）
       statusText.value = t('meeting.startingASRService')
       console.log('[meeting] Ensuring ASR service is running with current config...')
-      const profile = deps.getTranscriptionProfile()
       recordingProfile = profile
       const started = await deps.startASRService(profile)
-      if (cleanStop) return
+      if (cleanStop || !isCurrent()) return
       if (!started) {
         const errorMsg = deps.asrServiceError.value || t('meeting.asrServiceStartError')
         console.error('[meeting] Failed to start ASR service:', errorMsg)
@@ -304,27 +393,29 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           throw new Error('ASR service health check failed')
         }
       } catch (err) {
+        if (!isCurrent()) return
         console.error('[meeting] ASR service health check failed:', err)
         errorMessage.value = t('meeting.asrServiceStartError')
         isConnecting.value = false
         return
       }
+      if (cleanStop || !isCurrent()) return
 
       // 获取麦克风权限。
       // 注意：sampleRate 和 channelCount 不在此处约束（精确约束会触发 NotReadableError），
       // 而是在下游 worklet handler 中做重采样到 16kHz / 转 Int16。
-      mediaStream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: { ideal: false },
           noiseSuppression: { ideal: false },
           autoGainControl: { ideal: false },
         },
       })
-      if (cleanStop) {
-        mediaStream.getTracks().forEach(track => track.stop())
-        mediaStream = null
+      if (cleanStop || !isCurrent()) {
+        stream.getTracks().forEach(track => track.stop())
         return
       }
+      mediaStream = stream
 
       // 创建音频上下文
       audioContext = new AudioContext({ sampleRate: 16000 })
@@ -343,7 +434,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       // AudioWorklet 替代 deprecated ScriptProcessorNode，跑在 audio 线程不抢主线程。
       // JS 副本在 public/audio/pcm-worklet.js（源文件 src/audio/pcm-worklet.ts）。
       await audioContext.audioWorklet.addModule('/audio/pcm-worklet.js')
-      if (cleanStop) return
+      if (cleanStop || !isCurrent()) return
       const pcmNode = new AudioWorkletNode(audioContext, 'pcm-processor')
       source.connect(analyser.value)
       analyser.value.connect(pcmNode)
@@ -354,7 +445,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       recordingStartTime.value = Date.now()
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm' })
       mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
+        if (isCurrent() && e.data.size > 0) {
           audioChunks.value.push(e.data)
         }
       }
@@ -383,14 +474,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           }))
         }
 
-        diarizeWs.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data)
-            deps.handleWsMessage(data, 'diarize')
-          } catch (e) {
-            console.error('Failed to parse Diarize WS message:', e)
-          }
-        }
+        diarizeWs.onmessage = transcriptionMessageHandler('diarize', meetingId)
 
         diarizeWs.onerror = (error) => {
           console.error('Diarize WebSocket error (save mode):', error)
@@ -423,14 +507,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           ws?.send(JSON.stringify({ type: 'start' }))
         }
 
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data)
-            deps.handleWsMessage(data, 'asr')
-          } catch (e) {
-            console.error('Failed to parse ASR WS message:', e)
-          }
-        }
+        ws.onmessage = transcriptionMessageHandler('asr', meetingId)
 
         ws.onerror = (error) => {
           console.error('ASR WebSocket error:', error)
@@ -458,14 +535,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           }))
         }
 
-        diarizeWs.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data)
-            deps.handleWsMessage(data, 'diarize')
-          } catch (e) {
-            console.error('Failed to parse Diarize WS message:', e)
-          }
-        }
+        diarizeWs.onmessage = transcriptionMessageHandler('diarize', meetingId)
 
         diarizeWs.onerror = (error) => {
           console.error('Diarize WebSocket error:', error)
@@ -492,14 +562,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
           ws?.send(JSON.stringify({ type: 'start' }))
         }
 
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data)
-            deps.handleWsMessage(data, 'asr')
-          } catch (e) {
-            console.error('Failed to parse ASR WS message:', e)
-          }
-        }
+        ws.onmessage = transcriptionMessageHandler('asr', meetingId)
 
         ws.onerror = (error) => {
           console.error('ASR WebSocket error:', error)
@@ -550,6 +613,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       // 声浪可视化由 WaveformCanvas 组件监听 analyser 自动起停，无需手动调用。
 
     } catch (error: any) {
+      if (!isCurrent()) return
       console.error('[meeting] Failed to start recording:', error)
 
       // 启动中途失败（如 worklet addModule 被 CSP 拦截、WS 建连异常）时，
@@ -594,13 +658,53 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     }
   }
 
-  async function stopRecording() {
-    if (cleanStop) return
+  function stopRecording(): Promise<void> {
+    if (pendingStop) return pendingStop
+    if (cleanStop || !recordingScope) return Promise.resolve()
+    const stop = finishRecording(recordingScope.signal, isRecordingScopeCurrent).finally(() => {
+      if (pendingStop !== stop) return
+      isFinalizing.value = false
+      pendingStop = undefined
+    })
+    pendingStop = stop
+    return stop
+  }
+
+  function discardRecording() {
+    cleanStop = true
+    recordingScope?.abort()
+    recordingScope = undefined
+    pendingStop = undefined
+    clearReconnectTimer()
+    for (const socket of [ws, diarizeWs]) {
+      if (!socket) continue
+      socket.onopen = socket.onclose = socket.onmessage = null
+      socket.close()
+    }
+    ws = diarizeWs = null
+    if (mediaRecorder) {
+      mediaRecorder.ondataavailable = null
+      void stopMediaRecorder(mediaRecorder)
+      mediaRecorder = null
+    }
+    mediaStream?.getTracks().forEach(track => track.stop())
+    mediaStream = null
+    audioContext?.close().catch(() => {})
+    audioContext = null
+    audioChunks.value = []
+    detachBeforeUnloadAudioBackup()
+    analyser.value = null
+    isRecording.value = isConnecting.value = isFinalizing.value = false
+    statusText.value = ''
+  }
+
+  async function finishRecording(signal: AbortSignal, isCurrent: () => boolean) {
     const meetingId = meetingStore.activeSessionId
     const hadRecording = isRecording.value
     cleanStop = true
     clearReconnectTimer()
     reconnectAttempts = 0
+    isFinalizing.value = hadRecording
     isRecording.value = false
     isConnecting.value = false
     statusText.value = ''
@@ -608,37 +712,20 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     // 声浪可视化由 WaveformCanvas 监听 analyser 自动停止，这里只清空引用。
     analyser.value = null
 
-    // 停止媒体录制器
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-      mediaRecorder.stop()
-    }
+    const closingRecorder = mediaRecorder
     mediaRecorder = null
+    const recorderStopped = stopMediaRecorder(closingRecorder)
 
-    // 录音结束，移除关页/刷新兜底监听（正式落库由下方 saveAudioData 完成）
-    detachBeforeUnloadAudioBackup()
-
-    // 先捕获 socket 引用再置空成员变量：下方 500ms 延迟关闭读的是捕获的引用，
-    // 若直接读 ws/diarizeWs，此时已被置空，close() 会变成 no-op，socket 半开残留。
+    // Detach the PCM producer, then let both ASR streams send their final results.
     const closingAsrWs = ws
     const closingDiarizeWs = diarizeWs
-
-    // 发送停止消息给 ASR（ASR 已在录音过程中流式返回结果，500ms 后安全关闭）
-    if (closingAsrWs && closingAsrWs.readyState === WebSocket.OPEN) {
-      closingAsrWs.send(JSON.stringify({ type: 'stop' }))
-      setTimeout(() => closingAsrWs.close(), 500)
-    } else {
-      closingAsrWs?.close()
-    }
     ws = null
-
-    // 发送停止消息给 Diarize
-    if (closingDiarizeWs && closingDiarizeWs.readyState === WebSocket.OPEN) {
-      closingDiarizeWs.send(JSON.stringify({ type: 'stop' }))
-      setTimeout(() => closingDiarizeWs.close(), 500)
-    } else {
-      closingDiarizeWs?.close()
-    }
     diarizeWs = null
+    const asrTimeout = (asrProvider || meetingStore.activeSession?.asrProvider) === 'minimax' ? 75_000 : 12_000
+    const transcriptionStopped = Promise.all([
+      drainTranscription(closingAsrWs, asrTimeout, signal),
+      drainTranscription(closingDiarizeWs, 150_000, signal),
+    ])
 
     // 停止音频 + 关闭 worklet
     if (mediaStream) {
@@ -649,46 +736,45 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
       audioContext.close().catch(() => { /* best effort */ })
       audioContext = null
     }
-    analyser.value = null
 
-    // 保存音频（会议结束一次性落库）。录音期间 audioChunks 只累积在内存，
-    // MediaRecorder 每 1000ms 切一块，这里统一合成整段 webm 落库：
-    //  - 服务器：优先写，失败时 IndexedDB 仍兜底保留本机数据
-    //  - IndexedDB：直接存 Blob，作为离线备份
-    if (hadRecording) void deps.saveCurrentMeeting()
+    // The recorder sends the final dataavailable event before its stop event.
+    await recorderStopped
+    if (closingRecorder) closingRecorder.ondataavailable = null
+    if (!isCurrent()) return
+    detachBeforeUnloadAudioBackup()
+    let upload: Promise<void> | undefined
     if (audioChunks.value.length > 0 && meetingId) {
       const recording = new Blob(audioChunks.value, { type: 'audio/webm' })
       audioChunks.value = []
-      audioBlob.value = recording
-      if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
-      audioUrl.value = URL.createObjectURL(recording)
+      if (meetingStore.activeSessionId === meetingId) {
+        audioBlob.value = recording
+        if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
+        audioUrl.value = URL.createObjectURL(recording)
+      }
 
-      // 上传音频到服务器（失败不阻断 IndexedDB 本地备份）
-      await meetingStorageApi
+      upload = meetingStorageApi
         .uploadAudio(meetingId, recording)
-        .then(() => console.log('Audio saved to server'))
         .catch(err => {
+          if (!isCurrent()) return
           console.error('Failed to save audio to server:', err)
           message.error(t('meeting.errorUploadAudioFailed'))
         })
 
-      // 保存到 IndexedDB 作为本机备份（直接存 Blob，避免 base64 编码 33% 膨胀）
       try {
         await meetingStore.saveAudioData(meetingId, recording)
       } catch (err) {
         console.error('Failed to save audio to IndexedDB:', err)
       }
-
     }
 
-    // 录音停止后自动触发报告生成
+    await transcriptionStopped
     const session = meetingStore.activeSession
-    if (hadRecording && session && session.id === meetingId && session.sentences.length > 0 && deps.assistPanelRef.value) {
-      const transcript = session.sentences
-        .map(s => `${s.speaker ? `[${s.speaker}] ` : ''}${s.text}`)
-        .join('\n')
-      deps.assistPanelRef.value.generateReport(transcript)
+    if (isCurrent() && hadRecording && session && session.id === meetingId) {
+      void deps.saveCurrentMeeting()
+      const transcript = formatTranscriptForReport(deps.sentences.value, session.speakerMap)
+      if (transcript) deps.assistPanelRef.value?.generateReport(transcript)
     }
+    await upload
   }
 
   // --- 音频播放 ---
@@ -871,6 +957,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     // 录音会话状态
     isRecording,
     isConnecting,
+    isFinalizing,
     statusText,
     errorMessage,
     // 采集/录制
@@ -884,6 +971,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     detachBeforeUnloadAudioBackup,
     startRecording,
     stopRecording,
+    discardRecording,
     // 播放
     isPlaying,
     playbackTime,

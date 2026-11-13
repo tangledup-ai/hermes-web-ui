@@ -113,7 +113,7 @@ test('review H618 provider consent and discover a synced recording on focus', as
 
   published = true
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-  await page.getByText('Device meeting test', { exact: true }).click()
+  await page.getByRole('button', { name: /Device meeting test/ }).click()
   const marker = page.getByTestId('meeting-device-marker')
   await expect(marker).toHaveAccessibleName('Play from 00:03')
   await marker.click()
@@ -131,7 +131,7 @@ test('review H618 provider consent and discover a synced recording on focus', as
 
   // A fresh load has the original incomplete fixture. Switch accounts while
   // ASR startup is pending and verify the old recording cannot be uploaded.
-  await page.getByText('Device meeting test', { exact: true }).click()
+  await page.getByRole('button', { name: /Device meeting test/ }).click()
   await expect(page.getByTestId('meeting-device-retranscribe')).toBeEnabled()
   holdAsrStart = true
   await page.getByTestId('meeting-device-retranscribe').click()
@@ -148,4 +148,89 @@ test('review H618 provider consent and discover a synced recording on focus', as
   releaseAsrStart()
   await expect(page.getByTestId('meeting-device-retranscribe')).toHaveCount(0)
   await expect.poll(() => fileUploads, { timeout: 500 }).toBe(1)
+})
+
+test('follow hardware captions and open the same meeting with cited Agent minutes', async ({ page }) => {
+  const meetingId = 'h618-live-integration'
+  const startedAt = Date.now()
+  const sentence = { text: 'Launch is Friday. Lin owns the checklist.', timestamp: startedAt, startTime: 0, endTime: 3500 }
+  let published = false
+  let token = ''
+  let send: (data: string) => void = () => {}
+  const assistStarts: unknown[] = []
+  let reportTranscript: string | undefined
+
+  await page.addInitScript(() => {
+    localStorage.setItem('hermes_api_key', `test.${btoa(JSON.stringify({ sub: '1', role: 'super_admin' }))}.fixture`)
+    localStorage.setItem('hermes_locale', 'en')
+    localStorage.setItem('hermes_active_profile_name', 'default')
+  })
+  await page.routeWebSocket(/\/socket\.io\//, ws => {
+    ws.send('0{"sid":"h618-test","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}')
+    ws.onMessage(data => {
+      if (typeof data !== 'string' || !data.startsWith('40/meeting-live,')) return
+      token = data.slice('40/meeting-live,'.length)
+      send = frame => ws.send('42/meeting-live,' + frame)
+      ws.send('40/meeting-live,{"sid":"h618-live"}')
+      send(JSON.stringify(['sessions', []]))
+    })
+  })
+  await page.route(url => url.pathname.startsWith('/api/'), async route => {
+    const req = route.request()
+    const pathname = new URL(req.url()).pathname
+    if (pathname === '/api/hermes/profiles') {
+      return route.fulfill({ json: { profiles: [{ name: 'default', active: true, alias: 'Default' }] } })
+    }
+    if (pathname === '/api/studio/meeting-storage') {
+      return route.fulfill({ json: { meetings: published ? [meetingId] : [] } })
+    }
+    if (pathname === `/api/studio/meeting-storage/${meetingId}` && req.method() === 'GET') {
+      return route.fulfill({ json: {
+        id: meetingId, title: 'Friday launch review', createdAt: startedAt, updatedAt: startedAt,
+        source: 'h618', status: 'completed', sentences: [sentence],
+      } })
+    }
+    if (pathname === '/api/studio/meeting-asr/assist/start') assistStarts.push(req.postDataJSON())
+    if (pathname === '/api/studio/meeting-asr/report/stream') {
+      reportTranscript = req.postDataJSON().transcript
+      const markdown = '# Friday launch review\n\n## Overview\n\nLaunch is Friday. [00:00](#meeting-source-1)'
+      return route.fulfill({
+        contentType: 'text/event-stream',
+        body: `data: ${JSON.stringify({ text: markdown })}\n\ndata: [DONE]\n\n`,
+      })
+    }
+    return route.fulfill({ json: {} })
+  })
+
+  const fixture = '/@fs/' + resolve('tests/e2e/fixtures/local-capabilities.ts').replaceAll('\\', '/').replace(/^\//, '')
+  await page.route('**/__h618_live__', route => route.fulfill({
+    contentType: 'text/html',
+    body: `<div id="app"></div><script type="module" src="${fixture}"></script>`,
+  }))
+  await page.goto('/__h618_live__#/hermes/meeting')
+  await expect.poll(() => token).toContain('"profile":"default"')
+
+  const live = { id: meetingId, source: 'h618', startedAt, status: 'transcribing', partial: '', sentences: [] }
+  send(JSON.stringify(['session', { type: 'upsert', session: live }]))
+  await page.getByRole('button', { name: 'View live transcript' }).click()
+  await expect(page.getByTestId('meeting-device-live')).toContainText('Transcribing live')
+  await expect(page.getByRole('button', { name: 'Start Recording' })).toBeHidden()
+  send(JSON.stringify(['session', { type: 'partial', id: meetingId, text: 'Launch is' }]))
+  await expect(page.getByTestId('meeting-device-partial')).toContainText('Launch is')
+  send(JSON.stringify(['session', { type: 'final', id: meetingId, sentence }]))
+  await expect(page.getByTestId('meeting-device-partial')).toHaveCount(0)
+  await expect(page.getByText(sentence.text, { exact: true })).toBeVisible()
+  send(JSON.stringify(['session', { type: 'upsert', session: { ...live, status: 'disconnected', sentences: [sentence] } }]))
+  await expect(page.getByText('Live connection interrupted')).toBeVisible()
+  await expect(page.getByText(sentence.text, { exact: true })).toBeVisible()
+
+  published = true
+  send(JSON.stringify(['session', { type: 'upsert', session: { ...live, status: 'saved', sentences: [sentence] } }]))
+  await page.getByRole('button', { name: 'Open saved meeting' }).click()
+  await expect(page.getByRole('heading', { name: 'Friday launch review', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Generate Report', exact: true }).first().click()
+  await expect.poll(() => reportTranscript).toBe('[1] [00:00] Launch is Friday. Lin owns the checklist.')
+  await page.getByRole('link', { name: '00:00' }).click()
+  await expect(page.locator('#transcript-container [data-index="0"]')).toHaveClass(/highlighted/)
+  expect(assistStarts).toEqual([])
 })

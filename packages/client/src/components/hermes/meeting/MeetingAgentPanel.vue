@@ -124,7 +124,7 @@ function scrollToBottom() {
 watch(rounds, scrollToBottom, { deep: true })
 
 // Start/stop assist based on recording state
-watch(() => props.isRecording, async (recording) => {
+watch(() => props.isRecording, async (recording, wasRecording) => {
   if (recording) {
     // 保留同一会议的历史分析记录，仅重置报告状态
     reportMarkdown.value = ''
@@ -137,7 +137,7 @@ watch(() => props.isRecording, async (recording) => {
         body: JSON.stringify({ sessionId: props.sessionId, sceneTemplate: props.sceneTemplate, ...agent.value }),
       })
     } catch { /* best effort */ }
-  } else {
+  } else if (wasRecording) {
     // Stop assist
     try {
       await request('/api/studio/meeting-asr/assist/stop', {

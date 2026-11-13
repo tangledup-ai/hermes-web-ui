@@ -133,7 +133,8 @@ describe('meeting report generation (agent-first with fallback)', () => {
     expect(mocks.chatMock).toHaveBeenCalledTimes(1)
     // 透传场景 reportPrompt 作为 instructions、profile 作为目标 profile。
     const chatArgs = mocks.chatMock.mock.calls[0]
-    expect(chatArgs[3]).toContain('结构化 Markdown 报告')
+    expect(chatArgs[3]).toContain('## 决策与共识')
+    expect(chatArgs[3]).toContain('[00:27](#meeting-source-9)')
     expect(chatArgs[4]).toBe('default')
     expect(mocks.fetchMock).not.toHaveBeenCalled()
     // 一次性会话结束后销毁。
@@ -197,6 +198,22 @@ describe('meeting report generation (agent-first with fallback)', () => {
 
     expect(report).toBe('Final Report Text')
     expect(mocks.fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('includes the final report tail when Hermes only streamed the prefix', async () => {
+    wireBridge()
+    mocks.chatMock.mockResolvedValue({ run_id: 'report-with-tail' })
+    mocks.streamOutputMock.mockImplementation(async function* () {
+      yield { delta: '# Launch review\n', done: false }
+      yield { result: { final_response: '# Launch review\n\nFinal decision [00:27](#meeting-source-9)' }, done: true }
+    })
+
+    const { realtimeAssistService } = await import('../../packages/server/src/modules/studio/services/meeting-asr/realtime-assist')
+    const report = await collect(realtimeAssistService.generateReportStream('s4', 'transcript', 'general', {
+      profile: 'default', agentType: 'hermes',
+    }))
+
+    expect(report).toBe('# Launch review\n\nFinal decision [00:27](#meeting-source-9)')
   })
 
   it('interrupts a Hermes report that asks for approval and falls back', async () => {

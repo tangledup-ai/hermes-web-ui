@@ -2,6 +2,7 @@ import type { Context } from 'koa'
 import { meetingStorageService } from '../services/meeting-storage/index'
 import fs from 'fs/promises'
 import { DEVICE_SOURCE_HEADER, isH618MeetingSource, requireMeetingAccount } from '../services/meeting-asr/device-consent'
+import { deviceMeetingLiveService } from '../services/meeting-asr/device-live'
 import { MeetingProfileError } from '../services/meeting-asr/profile'
 import {
   DeviceRecordingError, deviceMeetingOwner, finishDeviceRecording, matchesMeetingOwner,
@@ -71,7 +72,9 @@ export async function saveMeeting(ctx: Context): Promise<void> {
   const { meetingId } = ctx.params
   if (isDeviceRequest(ctx)) {
     try {
-      await stageDeviceMeeting(meetingId, requireMeetingAccount(ctx), ctx.request.body)
+      const account = requireMeetingAccount(ctx)
+      await stageDeviceMeeting(meetingId, account, ctx.request.body)
+      deviceMeetingLiveService.syncing(account, meetingId)
       ctx.body = { status: 'ok' }
     } catch (error) {
       respondDeviceError(ctx, error)
@@ -168,7 +171,8 @@ export async function uploadDeviceRecording(ctx: Context): Promise<void> {
     const result = await finishDeviceRecording(
       ctx.params.meetingId, account, ctx.get('x-keli-idempotency-key'), ctx.req, AUDIO_UPLOAD_MAX_BYTES,
     )
-    ctx.body = { status: 'ok', ...result }
+    if (!result.reused) deviceMeetingLiveService.saved(account, result.meetingId, result.startedAt)
+    ctx.body = { status: 'ok', meetingId: result.meetingId, bytes: result.bytes, sha256: result.sha256, reused: result.reused }
   } catch (error) {
     respondDeviceError(ctx, error)
   }

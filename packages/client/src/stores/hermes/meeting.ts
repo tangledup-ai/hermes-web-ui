@@ -301,7 +301,7 @@ export const useMeetingStore = defineStore('meeting', () => {
     deleteAudioChunks(id).catch(err => console.warn('[meeting] deleteAudioChunks failed:', err))
   }
 
-  function setActiveSession(id: string) {
+  function setActiveSession(id: string | null) {
     activeSessionId.value = id
   }
 

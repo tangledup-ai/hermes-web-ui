@@ -30,6 +30,10 @@ import { useMessage } from '@/composables/useAppMessage'
 import { meetingStorageApi } from '@/utils/meeting-storage-api'
 import { extractMeetingTitleFromReport, requestAiMeetingTitle, formatTranscriptForTitle, canAutoRenameMeeting } from '@/utils/meeting-title'
 import { getProfileDisplayName } from '@/utils/hermes/profile-display'
+import DeviceMeetingLive from '@/components/hermes/meeting/DeviceMeetingLive.vue'
+import { useDeviceMeetingLive } from '@/composables/useDeviceMeetingLive'
+import { formatMeetingOffset as markerTime } from '@/utils/meeting-time'
+import { formatTranscriptForReport, meetingReportSourceIndex } from '@/utils/meeting-report-transcript'
 import { useMeetingAudio } from '@/composables/useMeetingAudio'
 import { useDraggableWidth } from '@/composables/useDraggableWidth'
 import { useDiarizeMerge } from '@/composables/useDiarizeMerge'
@@ -45,15 +49,29 @@ const profilesStore = useProfilesStore()
 const router = useRouter()
 
 // --- 侧边栏状态 ---
-const showSidebar = ref(true)
+const compactLayout = window.matchMedia('(max-width: 820px)')
+const isCompact = ref(compactLayout.matches)
+const showSidebar = ref(!isCompact.value)
+function updateCompactLayout(event: MediaQueryListEvent) {
+  isCompact.value = event.matches
+  if (event.matches) {
+    showSidebar.value = false
+    showRightPanel.value = false
+  }
+}
+const captureTab = ref<'web' | 'device'>('web')
+const viewingDeviceArchive = ref(false)
+const selectedLiveId = ref('')
+const archiveBusy = ref(false)
+const archiveError = ref(false)
 
 // 把 store 数据压扁成 MeetingSidebar 期望的最小结构（避免组件依赖 store 内部类型）
 const sidebarSessions = computed<SidebarSession[]>(() =>
   meetingStore.sortedSessions.map((s) => ({
     id: s.id,
     title: s.title,
+    source: s.source,
     updatedAt: s.updatedAt,
-    sentencesCount: s.sentences.length,
     hasAnalysis: Boolean(s.analysisResult || s.htmlContent),
   })),
 )
@@ -70,6 +88,17 @@ const agentTypeOptions = [
 ]
 
 const activeProfile = computed(() => profilesStore.activeProfileName || 'default')
+const { sessions: deviceSessions, connection: deviceConnection, reconnect: reconnectDevice } = useDeviceMeetingLive(activeProfile)
+const deviceInProgress = computed(() => deviceSessions.value.filter(session => session.status !== 'saved'))
+const selectedLive = computed(() => deviceSessions.value.find(session => session.id === selectedLiveId.value)
+  || deviceInProgress.value[0] || deviceSessions.value[0])
+const showDeviceWorkspace = computed(() => captureTab.value === 'device' && !viewingDeviceArchive.value)
+
+function showDeviceLive() {
+  captureTab.value = 'device'
+  viewingDeviceArchive.value = false
+  archiveError.value = false
+}
 const showDeviceConsent = ref(false)
 const consent = ref<MeetingDeviceConsent | null>(null)
 const consentBusy = ref(false)
@@ -186,7 +215,7 @@ const showAgentPanel = ref(true)
 const pendingMeetingWrites = new Map<string, Promise<void>>()
 let meetingScopeRevision = 0
 let meetingLoadId = 0
-let loadedDeviceMeeting = false
+const meetingLoading = ref(false)
 
 function checkMeetingScope() {
   const revision = meetingScopeRevision
@@ -213,6 +242,7 @@ const showDiarizeDialog = ref(false)
 const {
   isRecording,
   isConnecting,
+  isFinalizing,
   statusText,
   errorMessage,
   analyser,
@@ -220,6 +250,7 @@ const {
   audioUrl,
   startRecording,
   stopRecording,
+  discardRecording,
   isPlaying,
   playbackTime,
   playbackDuration,
@@ -274,8 +305,15 @@ const { isTranscribing, progress: transcribeProgress, transcribe, stop: stopFile
       message.warning(t('meeting.diarizeNoNewSentences'))
       return
     }
+    const reportHasSources = session.htmlContent.includes('#meeting-source-')
+    const sourceOrderChanged = session.sentences.some((sentence, index) => {
+      const next = updated.sentences[index]
+      return !next || next.text !== sentence.text || next.startTime !== sentence.startTime
+    })
+    const staleReport = reportHasSources && sourceOrderChanged
     meetingStore.updateSession(session.id, {
       ...updated,
+      ...(staleReport ? { htmlContent: '' } : {}),
       audioDuration: result.duration_sec || session.audioDuration,
       status: 'completed',
       transcriptIncomplete: replace ? false : session.transcriptIncomplete,
@@ -283,6 +321,7 @@ const { isTranscribing, progress: transcribeProgress, transcribe, stop: stopFile
     if (meetingStore.activeSessionId === session.id) {
       finalSentences.value = [...updated.sentences]
       speakerMap.value = { ...updated.speakerMap }
+      if (staleReport) htmlContent.value = ''
     }
     await persistMeeting(session.id)
     if (changed > 0) {
@@ -409,11 +448,6 @@ function retranscribeDeviceAudio() {
   })
 }
 
-function markerTime(offsetMs: number): string {
-  const seconds = Math.floor(offsetMs / 1000)
-  return [Math.floor(seconds / 60), seconds % 60].map(value => String(value).padStart(2, '0')).join(':')
-}
-
 function runDirectTranscription(sessionId: string, file: File) {
   void meetingStorageApi.uploadAudio(sessionId, file).catch((err) => {
     console.warn('[meeting] failed to persist uploaded audio:', err)
@@ -446,6 +480,37 @@ function exportMeetingTranscript() {
 
 // 当前活动会议
 const activeSession = computed(() => meetingStore.activeSession)
+const captureBusy = computed(() => isConnecting.value || isRecording.value || isFinalizing.value)
+const visibleSession = computed(() => captureTab.value === 'web' && activeSession.value?.source === 'h618'
+  ? null
+  : activeSession.value)
+const canRecordCurrent = computed(() => activeSession.value?.source !== 'h618'
+  && !meetingLoading.value && (!audioUrl.value && !sentences.value.length || isRecording.value || isConnecting.value || isFinalizing.value))
+
+async function openDeviceArchive() {
+  const live = selectedLive.value
+  if (!live || live.status !== 'saved' || captureBusy.value || archiveBusy.value) return
+  const sameScope = checkMeetingScope()
+  archiveBusy.value = true
+  archiveError.value = false
+  try {
+    await meetingStore.syncSessionsFromServer()
+    if (!sameScope() || !showDeviceWorkspace.value || selectedLive.value?.id !== live.id) return
+    const archived = meetingStore.sessions.find(session => session.id === live.id && session.source === 'h618')
+    if (!archived) {
+      archiveError.value = true
+      return
+    }
+    await loadMeeting(archived)
+    if (sameScope() && captureTab.value === 'device' && selectedLive.value?.id === live.id) viewingDeviceArchive.value = true
+  } finally {
+    if (sameScope()) archiveBusy.value = false
+  }
+}
+
+watch(() => deviceSessions.value.filter(session => session.status === 'saved').map(session => session.id).sort().join(','), (saved) => {
+  if (saved) void meetingStore.syncSessionsFromServer()
+})
 
 // 演讲评分场景：右侧面板切换为专用评估面板（计时员/赘语记录员/语法官）
 const isSpeechScene = computed(() => activeSession.value?.sceneTemplate === 'speech')
@@ -553,11 +618,21 @@ function onReportGenerated(markdown: string) {
     const title = extractMeetingTitleFromReport(markdown)
     if (title) meetingStore.updateSession(sessionId, { title, titleAutoNamed: true })
   }
+  if (!isSpeechScene.value && !isLegalScene.value && !isInterviewScene.value) showAgentPanel.value = false
   void persistMeeting(sessionId)
 }
 
 // --- 右侧面板 ---
-const showRightPanel = ref(true)
+const showRightPanel = ref(!compactLayout.matches)
+const panelStyle = computed(() => isCompact.value ? undefined : rightPanelStyle.value)
+function toggleAgentPanel() {
+  if (!showRightPanel.value) {
+    showAgentPanel.value = true
+    showRightPanel.value = true
+  } else {
+    showAgentPanel.value = !showAgentPanel.value
+  }
+}
 // 拖拽调宽逻辑（拆分至 useDraggableWidth，行为保持不变）
 const { style: rightPanelStyle, startResize: startRightPanelResize } = useDraggableWidth({
   storageKey: 'hermes.meeting.rightPanelWidth',
@@ -576,7 +651,7 @@ const profileOptions = computed(() => {
 
 // --- 会议管理 ---
 function openCreateModal() {
-  if (isConnecting.value || isRecording.value) return
+  if (captureBusy.value) return
   newMeetingTitle.value = `会议 ${new Date().toLocaleString('zh-CN')}`
   newMeetingAgentType.value = 'ekko'
   newMeetingAgentProfile.value = activeProfile.value
@@ -596,7 +671,7 @@ watch(transcriptionSetting, () => {
 })
 
 function handleCreateMeeting() {
-  if (createMeetingDisabled.value) return
+  if (createMeetingDisabled.value || captureBusy.value) return
   const agentConfig: AgentConfig = {
     agentType: newMeetingAgentType.value,
     profile: newMeetingAgentProfile.value || activeProfile.value,
@@ -610,6 +685,7 @@ function handleCreateMeeting() {
   })
 
   resetMeetingState()
+  captureTab.value = 'web'
   showAgentPanel.value = true
   showCreateModal.value = false
   void persistMeeting(session.id)
@@ -620,19 +696,22 @@ function handleCreateMeeting() {
 
 // MeetingSidebar 只传 sessionId；这里把它查回 store 中的完整 session，再走原 loadMeeting。
 function selectMeetingById(sessionId: string) {
-  const session = meetingStore.sortedSessions.find((s) => s.id === sessionId)
-  if (session) loadMeeting(session)
+  if (captureBusy.value) return
+  const session = meetingStore.sessions.find((item) => item.id === sessionId)
+  if (!session) return
+  captureTab.value = session.source === 'h618' ? 'device' : 'web'
+  viewingDeviceArchive.value = session.source === 'h618'
+  if (isCompact.value) showSidebar.value = false
+  void loadMeeting(session)
 }
 
 async function loadMeeting(session: MeetingSession) {
-  if (isConnecting.value) return
-  const loadId = ++meetingLoadId
+  if (captureBusy.value) return
+  resetMeetingState()
+  const loadId = meetingLoadId
   const sameScope = checkMeetingScope()
-  if (isRecording.value) await stopRecording()
-  if (loadId !== meetingLoadId || !sameScope()) return
   meetingStore.setActiveSession(session.id)
-  loadedDeviceMeeting = session.source === 'h618'
-  clearPlaybackAudio()
+  meetingLoading.value = true
   const isCurrent = () => loadId === meetingLoadId && sameScope() && meetingStore.activeSessionId === session.id
   await pendingMeetingWrites.get(session.id)
   if (!isCurrent()) return
@@ -649,7 +728,6 @@ async function loadMeeting(session: MeetingSession) {
       speakerMap.value = serverData.speakerMap || {}
       useDiarize.value = HIDE_SPEAKER_DIARIZATION ? false : (serverData.useDiarize || false)
       if (serverData.source === 'h618') {
-        loadedDeviceMeeting = true
         meetingStore.updateSession(session.id, {
           markers: serverData.markers,
           captureStatus: serverData.captureStatus,
@@ -688,8 +766,13 @@ async function loadMeeting(session: MeetingSession) {
   errorMessage.value = ''
   highlightedSentenceIndex.value = -1
 
+  showAgentPanel.value = !htmlContent.value
   // 加载音频数据
-  await loadAudioForSession(session.id, isCurrent)
+  try {
+    await loadAudioForSession(session.id, isCurrent)
+  } finally {
+    if (isCurrent()) meetingLoading.value = false
+  }
 }
 
 function clearPlaybackAudio() {
@@ -728,10 +811,13 @@ async function loadAudioForSession(sessionId: string, isCurrent: () => boolean) 
 
 async function deleteMeeting(id: string) {
   const wasActive = meetingStore.activeSessionId === id
-  if (wasActive && isConnecting.value) return
-  if (wasActive && isRecording.value) await stopRecording()
+  if (wasActive && captureBusy.value) return
   meetingStore.deleteSession(id)
-  if (wasActive) resetMeetingState()
+  if (wasActive) {
+    resetMeetingState()
+    if (meetingStore.activeSession) selectMeetingById(meetingStore.activeSession.id)
+    else viewingDeviceArchive.value = false
+  }
   try {
     await pendingMeetingWrites.get(id)
     await meetingStorageApi.deleteMeeting(id)
@@ -743,7 +829,7 @@ async function deleteMeeting(id: string) {
 
 function resetMeetingState() {
   meetingLoadId += 1
-  loadedDeviceMeeting = false
+  meetingLoading.value = false
   finalSentences.value = []
   analysisResult.value = null
   htmlContent.value = ''
@@ -874,14 +960,18 @@ function cancelScopedTranscription() {
 }
 
 function clearScopedMeetings() {
+  discardRecording()
   cancelScopedTranscription()
   consentRequest += 1
   consent.value = null
   consentBusy.value = false
   showDeviceConsent.value = false
-  if (loadedDeviceMeeting || meetingStore.activeSession?.source === 'h618') {
-    resetMeetingState()
-  }
+  selectedLiveId.value = ''
+  viewingDeviceArchive.value = false
+  archiveBusy.value = false
+  archiveError.value = false
+  meetingStore.setActiveSession(null)
+  resetMeetingState()
 }
 
 watch(activeProfile, () => {
@@ -894,6 +984,7 @@ let unsubscribeAuth = () => {}
 // --- 生命周期 ---
 onMounted(async () => {
   unsubscribeAuth = onAuthInvalidated(clearScopedMeetings)
+  compactLayout.addEventListener('change', updateCompactLayout)
   window.addEventListener('focus', syncFocusedMeetings)
   document.addEventListener('visibilitychange', syncFocusedMeetings)
   await Promise.all([
@@ -904,7 +995,7 @@ onMounted(async () => {
   
   // 如果有活跃会议，加载它
   if (meetingStore.activeSession) {
-    loadMeeting(meetingStore.activeSession)
+    selectMeetingById(meetingStore.activeSession.id)
   }
   // 不再默认打开新建会议弹窗，用户需要点击"新建会议"按钮
 })
@@ -912,6 +1003,7 @@ onMounted(async () => {
 onUnmounted(() => {
   cancelScopedTranscription()
   unsubscribeAuth()
+  compactLayout.removeEventListener('change', updateCompactLayout)
   window.removeEventListener('focus', syncFocusedMeetings)
   document.removeEventListener('visibilitychange', syncFocusedMeetings)
   stopRecording()
@@ -1044,8 +1136,8 @@ function handleWsMessage(data: any, source: 'asr' | 'diarize' = 'asr') {
 
 async function triggerAnalysis() {
   const session = meetingStore.activeSession
-  if (!session) return
-  const transcript = formatTranscriptForTitle(session.sentences)
+  if (!session || captureBusy.value || showDeviceWorkspace.value) return
+  const transcript = formatTranscriptForReport(session.sentences, session.speakerMap)
   if (!transcript.trim()) {
     errorMessage.value = t('meeting.noTranscript')
     return
@@ -1058,6 +1150,24 @@ async function triggerAnalysis() {
   if (assistPanelRef.value) {
     assistPanelRef.value.generateReport(transcript)
   }
+}
+
+async function openReportSource(event: MouseEvent) {
+  const link = event.target instanceof Element ? event.target.closest('a[href]') : null
+  const href = link?.getAttribute('href')
+  if (!href?.startsWith('#meeting-source-')) return
+  event.preventDefault()
+  event.stopPropagation()
+  const index = meetingReportSourceIndex(href)
+  if (index == null || !sentences.value[index]) return
+  showReport.value = false
+  if (isCompact.value) showRightPanel.value = false
+  await nextTick()
+  const row = document.querySelector<HTMLElement>(`#transcript-container [data-index="${index}"]`)
+  highlightedSentenceIndex.value = index
+  row?.focus({ preventScroll: true })
+  row?.scrollIntoView({ block: 'center' })
+  seekToSentence(index)
 }
 
 // --- Action item formatters (support both string and object forms) ---
@@ -1081,6 +1191,7 @@ function formatActionDeadline(item: any): string {
 
 // --- 分析功能 ---
 async function clearTranscript() {
+  if (captureBusy.value || !visibleSession.value || showDeviceWorkspace.value || audioUrl.value || visibleSession.value.source === 'h618') return
   finalSentences.value = []
   partialText.value = ''
   analysisResult.value = null
@@ -1103,7 +1214,8 @@ async function clearTranscript() {
     <MeetingSidebar
       v-model:expanded="showSidebar"
       :sessions="sidebarSessions"
-      :active-id="meetingStore.activeSessionId"
+      :active-id="showDeviceWorkspace ? null : visibleSession?.id ?? null"
+      :selection-disabled="captureBusy"
       @create="openCreateModal"
       @select="selectMeetingById"
     >
@@ -1112,6 +1224,7 @@ async function clearTranscript() {
           <template #trigger>
             <button
               class="meeting-item-delete"
+              :disabled="captureBusy && session.id === activeSession?.id"
               @click.stop
               :title="t('common.delete')"
             >
@@ -1137,21 +1250,37 @@ async function clearTranscript() {
         :save-mode="saveMode"
         :speaker-count="speakerCount"
         :speaker-count-options="speakerCountOptions"
-        :is-recording="isRecording"
-        :has-sentences="sentences.length > 0"
+        :is-recording="captureBusy"
+        :has-meeting="!showDeviceWorkspace && !!visibleSession"
+        :can-clear="visibleSession?.source !== 'h618' && !audioUrl"
+        :has-sentences="!showDeviceWorkspace && !!visibleSession && sentences.length > 0"
         :hide-speaker-diarization="HIDE_SPEAKER_DIARIZATION"
         @toggle-sidebar="showSidebar = !showSidebar"
-        @toggle-agent-panel="showAgentPanel = !showAgentPanel"
+        @toggle-agent-panel="toggleAgentPanel"
         @export-transcript="exportMeetingTranscript"
         @toggle-diarize="useDiarize = !useDiarize"
         @toggle-save-mode="saveMode = !saveMode"
         @update:speaker-count="speakerCount = $event"
         @clear-transcript="clearTranscript"
       />
-      <div class="device-meeting-actions">
+      <div class="meeting-source-bar">
+        <div class="meeting-sources" :aria-label="t('meeting.workspace.sources')" role="group">
+          <button type="button" :aria-pressed="captureTab === 'web'" @click="captureTab = 'web'">
+            {{ t('meeting.workspace.web') }}
+            <span v-if="captureBusy" class="source-count" aria-hidden="true">●</span>
+          </button>
+          <button type="button" :aria-pressed="captureTab === 'device'" @click="showDeviceLive">
+            {{ t('meeting.workspace.device') }}
+            <span v-if="deviceInProgress.length" class="source-count">{{ deviceInProgress.length }}</span>
+          </button>
+        </div>
         <NButton size="small" quaternary data-testid="meeting-device-consent" @click="openDeviceConsent">
           {{ t('meeting.deviceConsent') }}
         </NButton>
+      </div>
+      <div v-if="captureTab === 'web' && deviceConnection === 'ready' && deviceInProgress.length" class="device-live-notice" role="status">
+        <span>{{ t('meeting.workspace.deviceDetected') }}</span>
+        <NButton size="small" secondary @click="showDeviceLive">{{ t('meeting.workspace.watchLive') }}</NButton>
       </div>
       <NModal v-model:show="showDeviceConsent" preset="dialog" :title="t('meeting.deviceConsent')">
         <NSpin :show="consentBusy">
@@ -1181,11 +1310,65 @@ async function clearTranscript() {
       </NModal>
 
       <!-- 主内容区 -->
-      <div class="meeting-content">
+      <div v-if="showDeviceWorkspace" class="meeting-content device-workspace">
+        <div v-if="deviceSessions.length > 1" class="device-session-picker">
+          <NSelect
+            v-model:value="selectedLiveId"
+            :placeholder="t('meeting.workspace.device')"
+            :options="deviceSessions.map(session => ({
+              value: session.id,
+              label: `H618 · ${new Date(session.startedAt).toLocaleString()} · ${t(`meeting.workspace.${session.status}`)}`,
+            }))"
+            @update:value="archiveError = false"
+          />
+        </div>
+        <NAlert v-if="archiveError" class="archive-error" type="error">{{ t('meeting.workspace.archiveError') }}</NAlert>
+        <DeviceMeetingLive
+          v-if="selectedLive"
+          :session="selectedLive"
+          :connected="deviceConnection === 'ready'"
+          :archive-disabled="captureBusy || archiveBusy"
+          @archive="openDeviceArchive"
+          @retry="reconnectDevice"
+        />
+        <section v-else class="meeting-welcome">
+          <div class="welcome-card" data-theme-surface="card">
+            <p class="welcome-label">H618</p>
+            <h2>{{ t('meeting.workspace.device') }}</h2>
+            <p>{{ t(`meeting.workspace.${deviceConnection === 'ready' ? 'deviceIdle' : deviceConnection === 'connecting' ? 'connecting' : 'unavailable'}`) }}</p>
+            <NButton v-if="deviceConnection === 'unavailable'" @click="reconnectDevice">{{ t('meeting.deviceConsentRetry') }}</NButton>
+            <NButton v-else secondary @click="openDeviceConsent">{{ t('meeting.deviceConsent') }}</NButton>
+          </div>
+        </section>
+      </div>
+      <div v-if="!visibleSession && captureTab === 'web'" class="meeting-content">
+        <section class="meeting-welcome">
+          <div class="welcome-card" data-theme-surface="card">
+            <p class="welcome-label">{{ t('meeting.workspace.web') }}</p>
+            <h2>{{ t('meeting.workspace.webHeading') }}</h2>
+            <p>{{ t('meeting.workspace.webDescription') }}</p>
+            <NButton type="primary" @click="openCreateModal">{{ t('meeting.newMeeting') }}</NButton>
+          </div>
+        </section>
+      </div>
+      <div v-show="!showDeviceWorkspace && !!visibleSession" class="meeting-content meeting-document" @click.capture="openReportSource">
       <!-- 左侧：转写区域 -->
       <div class="transcript-panel" :class="{ 'speech-scene': isSpeechScene, 'legal-scene': isLegalScene, 'interview-scene': isInterviewScene }">
+        <header v-if="visibleSession" class="transcript-heading">
+          <div>
+            <p>{{ t(visibleSession.source === 'h618' ? 'meeting.workspace.device' : 'meeting.workspace.web') }} · {{ new Date(visibleSession.createdAt).toLocaleDateString() }}</p>
+            <h2>{{ visibleSession.title }}</h2>
+          </div>
+          <NButton
+            v-if="!isSpeechScene && !isLegalScene && !isInterviewScene"
+            size="small"
+            secondary
+            :disabled="captureBusy || !sentences.length"
+            @click="htmlContent ? (showAgentPanel = false, showRightPanel = true) : triggerAnalysis()"
+          >{{ t(htmlContent ? 'meeting.workspace.minutes' : 'meeting.generateReport') }}</NButton>
+        </header>
         <!-- 可视化区域（场景浮层经 scene-ui-registry 声明式渲染） -->
-        <div class="waveform-stage" :class="`phase-${speechPhase}`">
+        <div v-if="sceneUI.stageOverlay || isRecording || isConnecting" class="waveform-stage" :class="`phase-${speechPhase}`">
           <WaveformCanvas :analyser="analyser" :connecting="isConnecting" />
           <component v-if="sceneUI.stageOverlay" :is="sceneUI.stageOverlay" />
         </div>
@@ -1196,7 +1379,7 @@ async function clearTranscript() {
         <div class="status-bar">
           <div v-if="!sceneUI.transcriptStrip" class="status-indicator" :class="{ active: isRecording }">
             <span class="status-dot"></span>
-            <span>{{ statusText || t('meeting.idle') }}</span>
+            <span>{{ isFinalizing ? t('meeting.workspace.finalizing') : isRecording || isConnecting ? statusText : t('meeting.workspace.liveTranscript') }}</span>
           </div>
           <div v-if="errorMessage" class="error-message">
             {{ errorMessage }}
@@ -1210,6 +1393,8 @@ async function clearTranscript() {
                 <button
                   class="panel-toggle-btn"
                   :class="{ active: showRightPanel }"
+                  :aria-label="t(showRightPanel ? 'meeting.hidePanel' : 'meeting.showPanel')"
+                  :aria-expanded="showRightPanel"
                   @click="showRightPanel = !showRightPanel"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -1268,21 +1453,43 @@ async function clearTranscript() {
           :sentences="sentences"
           :partial-text="partialText"
           :highlighted-index="highlightedSentenceIndex"
-          :is-recording="isRecording"
+          :is-recording="captureBusy"
+          :has-audio="!!audioUrl"
           :hide-speaker-diarization="HIDE_TRANSCRIPT_SPEAKERS"
           @seek="seekToSentence"
           @rename="onTranscriptRename"
         />
 
+        <div v-if="audioUrl && !captureBusy" class="audio-section transcript-playback">
+          <div class="audio-player">
+            <button type="button" class="audio-play-btn" :aria-label="t(isPlaying ? 'meeting.workspace.pauseAudio' : 'meeting.workspace.playAudio')" @click="togglePlayPause()">
+              <svg v-if="!isPlaying" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="4" width="4" height="16"/>
+                <rect x="14" y="4" width="4" height="16"/>
+              </svg>
+            </button>
+            <div class="audio-info">
+              <span class="audio-time">{{ formatDuration(playbackTime) }}</span>
+              <div class="progress-track" @click="seekToPosition" @mousedown="startProgressDrag">
+                <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
+                <div class="progress-thumb" :style="{ left: progressPercent + '%' }"></div>
+              </div>
+              <span class="audio-time">{{ formatDuration(playbackDuration || activeSession?.audioDuration || 0) }}</span>
+            </div>
+          </div>
+        </div>
+
         <!-- 录音按钮 -->
-        <div class="record-button-container">
+        <div v-if="canRecordCurrent" class="record-button-container">
           <button
-            v-if="activeSession?.source !== 'h618'"
             class="record-button"
             :class="{ recording: isRecording, connecting: isConnecting }"
             :aria-label="isRecording ? t('meeting.stop') : (isConnecting ? t('meeting.connecting') : t('meeting.start'))"
             @click="isRecording ? stopRecording() : startRecording()"
-            :disabled="isConnecting"
+            :disabled="isConnecting || isFinalizing"
           >
             <svg v-if="!isRecording && !isConnecting" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
@@ -1294,29 +1501,29 @@ async function clearTranscript() {
             <NSpin v-else size="small" />
           </button>
           <span class="record-label">
-            {{ isRecording ? t('meeting.stop') : (isConnecting ? t('meeting.connecting') : t('meeting.start')) }}
+            {{ isFinalizing ? t('meeting.workspace.finalizing') : isRecording ? t('meeting.stop') : isConnecting ? t('meeting.connecting') : t('meeting.start') }}
           </span>
         </div>
       </div>
 
       <!-- 右侧：分析面板（壳已拆出 MeetingRightPanel） -->
       <MeetingRightPanel
-        :visible="showRightPanel"
+        :visible="showRightPanel && !!activeSession"
         :is-speech-scene="isSpeechScene"
         :is-legal-scene="isLegalScene"
         :is-interview-scene="isInterviewScene"
         :show-agent-panel="showAgentPanel"
-        :can-download-audio="!isRecording && !!audioUrl"
-        :can-diarize="!isRecording && !!audioBlob"
+        :can-download-audio="!captureBusy && !!audioUrl"
+        :can-diarize="!captureBusy && !!audioBlob"
         :is-diarizing="transcriptionBusy"
-        :resize-style="rightPanelStyle"
+        :resize-style="panelStyle"
         @close="showRightPanel = false"
         @download-audio="downloadAudio"
         @diarize="openDiarizeDialog"
         @resize-start="startRightPanelResize"
       >
         <template #toolbar>
-          <div class="toolbar-actions">
+          <div v-if="!htmlContent" class="toolbar-actions">
             <NTooltip trigger="hover">
               <template #trigger>
                 <NButton
@@ -1406,7 +1613,7 @@ async function clearTranscript() {
             ref="assistPanelRef"
             :session-id="meetingStore.activeSessionId"
             :scene-template="activeSession?.sceneTemplate || 'general'"
-            :is-recording="isRecording"
+            :is-recording="isRecording || isFinalizing"
             @report-generated="onReportGenerated"
             @request-report="triggerAnalysis"
           />
@@ -1414,31 +1621,17 @@ async function clearTranscript() {
 
         <template #analysis>
           <div class="right-panel-content">
+            <div v-if="htmlContent" class="report-preview-section" data-theme-surface="card">
+              <div class="report-preview-header">
+                <h3>{{ t('meeting.workspace.minutes') }}</h3>
+                <NButton size="small" secondary @click="showReport = true">{{ t('meeting.openReport') }}</NButton>
+              </div>
+              <iframe v-if="isHtmlReport" :srcdoc="htmlContent" sandbox="" class="report-preview-iframe"></iframe>
+              <MarkdownRenderer v-else :content="htmlContent" />
+            </div>
             <!-- 下载区域 - 始终显示 -->
             <div class="download-section">
               <h3>{{ t('meeting.downloads') }}</h3>
-              <!-- 音频播放器 -->
-              <div v-if="audioUrl" class="audio-section">
-                <div class="audio-player">
-                  <button class="audio-play-btn" @click="togglePlayPause()">
-                    <svg v-if="!isPlaying" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M8 5v14l11-7z"/>
-                    </svg>
-                    <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                      <rect x="6" y="4" width="4" height="16"/>
-                      <rect x="14" y="4" width="4" height="16"/>
-                    </svg>
-                  </button>
-                  <div class="audio-info">
-                    <span class="audio-time">{{ formatDuration(playbackTime) }}</span>
-                    <div class="progress-track" @click="seekToPosition" @mousedown="startProgressDrag">
-                      <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
-                      <div class="progress-thumb" :style="{ left: progressPercent + '%' }"></div>
-                    </div>
-                    <span class="audio-time">{{ formatDuration(playbackDuration) }}</span>
-                  </div>
-                </div>
-              </div>
               <!-- 下载按钮 -->
               <div class="download-actions">
                 <NButton size="small" @click="downloadAudio" :disabled="isRecording || !audioUrl">
@@ -1604,7 +1797,7 @@ async function clearTranscript() {
             </template>
 
             <!-- 提示区域 - 当有转写内容但没有分析结果时显示 -->
-            <div v-if="!analysisResult && sentences.length > 0" class="analysis-hint">
+            <div v-if="!analysisResult && !htmlContent && sentences.length > 0" class="analysis-hint">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.5">
                 <circle cx="12" cy="12" r="10"/>
                 <path d="M12 16v-4"/>
@@ -1624,23 +1817,6 @@ async function clearTranscript() {
                 </template>
                 {{ t('meeting.triggerAnalysis') }}
               </NButton>
-            </div>
-
-            <!-- 报告预览：有 htmlContent 时直接渲染，HTML 内容始终可见 -->
-            <div v-if="htmlContent" class="report-preview-section" data-theme-surface="card">
-              <div class="report-preview-header">
-                <h3>{{ t('meeting.reportPreview') }}</h3>
-                <div class="report-preview-actions">
-                  <NButton size="tiny" @click="showReport = true">
-                    {{ t('meeting.openReport') }}
-                  </NButton>
-                  <NButton size="tiny" @click="downloadReport" :disabled="isRecording">
-                    {{ t('meeting.downloadReport') }}
-                  </NButton>
-                </div>
-              </div>
-              <iframe v-if="isHtmlReport" :srcdoc="htmlContent" sandbox="" class="report-preview-iframe"></iframe>
-              <MarkdownRenderer v-else :content="htmlContent" />
             </div>
 
             <!-- 空状态 -->
@@ -1747,11 +1923,11 @@ async function clearTranscript() {
       @start="onDiarizeStart"
     />
 
-    <div v-if="showReport" class="report-modal" @click.self="showReport = false">
+    <div v-if="showReport" class="report-modal" role="dialog" aria-modal="true" :aria-label="t('meeting.report')" @click.self="showReport = false" @click.capture="openReportSource" @keydown.esc="showReport = false">
       <div class="report-container">
         <div class="report-header">
           <h2>{{ t('meeting.report') }}</h2>
-          <button class="close-button" @click="showReport = false">
+          <button class="close-button" :aria-label="t('common.close')" @click="showReport = false">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"/>
               <line x1="6" y1="6" x2="18" y2="18"/>
@@ -1784,7 +1960,7 @@ async function clearTranscript() {
 :deep(.sidebar-backdrop) {
   display: none;
 
-  @media (max-width: 768px) {
+  @media (max-width: 820px) {
     display: block;
     position: fixed;
     inset: 0;
@@ -1818,7 +1994,7 @@ async function clearTranscript() {
     border-right: none;
   }
 
-  @media (max-width: 768px) {
+  @media (max-width: 820px) {
     position: fixed;
     left: 0;
     top: 0;
@@ -1917,7 +2093,8 @@ async function clearTranscript() {
 }
 
 /* 让 hover 父级（列表项）时显示删除按钮——拆成独立规则，因为 SCSS 嵌套 + :deep + & 不能正确编译。*/
-:deep(.meeting-list-item:hover) .meeting-item-delete {
+:deep(.meeting-list-item:hover) .meeting-item-delete,
+:deep(.meeting-list-item:focus-within) .meeting-item-delete {
   opacity: 1;
 }
 
@@ -1990,6 +2167,121 @@ async function clearTranscript() {
 :deep(.meeting-controls) {
   display: flex;
   gap: 8px;
+}
+
+.meeting-source-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid $border-color;
+}
+
+.meeting-sources {
+  display: flex;
+  gap: 4px;
+
+  button {
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: $text-secondary;
+    background: transparent;
+    font-weight: 600;
+    cursor: pointer;
+
+    &[aria-pressed='true'] {
+      background: rgba(var(--accent-primary-rgb), 0.1);
+      color: $accent-primary;
+    }
+  }
+}
+
+.source-count {
+  margin-inline-start: 4px;
+  color: var(--success);
+  font-size: 11px;
+}
+
+.device-live-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 20px;
+  background: rgba(var(--accent-primary-rgb), 0.06);
+  border-bottom: 1px solid $border-color;
+  color: $text-primary;
+  font-size: 13px;
+}
+
+.device-workspace { flex-direction: column; }
+.device-session-picker { max-width: 390px; margin: 12px clamp(16px, 4vw, 42px) 0; }
+.archive-error { margin: 12px clamp(16px, 4vw, 42px) 0; }
+
+.meeting-welcome {
+  flex: 1;
+  overflow: auto;
+  padding: clamp(18px, 5vw, 64px);
+}
+
+.welcome-card {
+  width: min(100%, 660px);
+  box-sizing: border-box;
+  padding: clamp(22px, 4vw, 44px);
+  border: 1px solid $border-color;
+  border-radius: var(--radius-component, 12px);
+
+  h2 { margin: 0; font-size: clamp(25px, 4vw, 40px); line-height: 1.2; letter-spacing: -0.025em; }
+  p { margin: 12px 0 24px; color: $text-secondary; line-height: 1.65; }
+  .welcome-label { margin: 0 0 10px; font-size: 12px; color: $accent-primary; font-weight: 650; }
+}
+
+.transcript-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 18px clamp(16px, 4vw, 42px);
+  border-bottom: 1px solid $border-color;
+
+  > div { flex: 1; min-width: 12ch; }
+  p { margin: 0 0 5px; color: $text-secondary; font-size: 12px; }
+  h2 { margin: 0; font-size: clamp(19px, 3vw, 28px); line-height: 1.25; overflow-wrap: anywhere; }
+}
+
+.transcript-playback {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 10px clamp(16px, 4vw, 42px);
+  border-top: 1px solid $border-color;
+}
+
+.meeting-document {
+  position: relative;
+
+  @media (max-width: 820px) {
+    :deep(.right-panel) {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      min-width: 0;
+      width: 100%;
+      max-width: 100%;
+    }
+
+    :deep(.right-panel-resize-handle) { display: none; }
+  }
+}
+
+@media (max-width: 520px) {
+  .meeting-source-bar { align-items: flex-start; flex-wrap: wrap; gap: 4px; padding: 8px 12px; }
+  .device-live-notice { padding-inline: 12px; }
+  .device-live-notice .n-button { flex-shrink: 0; }
+  :deep(.meeting-header) { align-items: flex-start; flex-wrap: wrap; gap: 6px; }
+  :deep(.meeting-controls) { flex-wrap: wrap; }
 }
 
 .meeting-content {
@@ -2091,7 +2383,9 @@ async function clearTranscript() {
 
     .status-dot {
       background: var(--error);
-      animation: pulse 1.5s infinite;
+      @media (prefers-reduced-motion: no-preference) {
+        animation: pulse 1.5s infinite;
+      }
     }
   }
 }
@@ -2150,7 +2444,7 @@ async function clearTranscript() {
   &.recording {
     background: var(--error);
     box-shadow: 0 4px 12px rgba(var(--error-rgb), 0.3);
-    animation: pulse-button 1.5s infinite;
+
   }
 
   &.connecting {
@@ -2162,11 +2456,6 @@ async function clearTranscript() {
     opacity: 0.5;
     cursor: not-allowed;
   }
-}
-
-@keyframes pulse-button {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.05); }
 }
 
 .record-label {
