@@ -7,7 +7,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 BACKEND = Path(__file__).resolve().parents[2] / "packages/server/src/modules/studio/services/meeting-asr/python-backend"
 if str(BACKEND) not in sys.path:
@@ -85,3 +85,14 @@ class TranscriptionContextTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.transcribe.get_job("job-1"), {"status": "done"})
         finally:
             self.config.transcription_owner.reset(owner)
+
+    async def test_diarization_client_can_disconnect_before_start(self):
+        endpoint = importlib.import_module("app.diarize_endpoint")
+        socket = Mock(
+            accept=AsyncMock(),
+            receive=AsyncMock(return_value={"type": "websocket.disconnect", "code": 1000}),
+            send_json=AsyncMock(side_effect=endpoint.WebSocketDisconnect()),
+        )
+        await endpoint.diarize_ws_handler(socket)
+        socket.accept.assert_awaited_once()
+        socket.send_json.assert_awaited_once_with({"type": "stopped"})

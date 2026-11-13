@@ -23,7 +23,7 @@ from typing import Any
 
 import websockets
 from websockets.exceptions import ConnectionClosed
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 from .config import settings
 from .diarize_proxy import DiarizeClient, parse_sentences, upload_wav_to_oss

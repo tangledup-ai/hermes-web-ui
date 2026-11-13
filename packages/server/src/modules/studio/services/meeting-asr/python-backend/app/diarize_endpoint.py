@@ -46,6 +46,8 @@ async def diarize_ws_handler(ws: WebSocket) -> None:
     fallback_mode = not settings.oss_configured
     try:
         first = await ws.receive()
+        if first["type"] == "websocket.disconnect":
+            return
         if "text" not in first:
             await _send(ws, {"type": "error", "message": "expected JSON start frame"})
             await ws.close()
