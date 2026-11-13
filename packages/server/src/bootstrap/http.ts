@@ -591,8 +591,11 @@ export async function bootstrap() {
 
   // SPA fallback
   const distDir = resolve(__dirname, '..', 'client')
-  app.use(createStaticCompressionMiddleware())
+  app.use(createStaticCompressionMiddleware({ precompressedRoot: distDir }))
   app.use(serve(distDir, {
+    // Negotiate sidecars and dynamic compression together in the middleware.
+    gzip: false,
+    brotli: false,
     setHeaders(res, filePath) {
       const cacheControl = getStaticCacheControl(relative(distDir, filePath))
       if (cacheControl) res.setHeader('Cache-Control', cacheControl)
@@ -603,7 +606,7 @@ export async function bootstrap() {
       !ctx.path.startsWith('/api') &&
       ctx.path !== '/health') {
       ctx.set('Cache-Control', SPA_ENTRY_CACHE_CONTROL)
-      await send(ctx, 'index.html', { root: distDir })
+      await send(ctx, 'index.html', { root: distDir, gzip: false, brotli: false })
     }
   })
   console.log('[bootstrap] SPA fallback registered')

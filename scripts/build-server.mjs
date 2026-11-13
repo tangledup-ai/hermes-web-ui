@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'fs'
 
 import { assertTerminalRuntimeBundle } from './verify-terminal-runtime.mjs'
+import { precompressClientAssets } from './precompress-client-assets.mjs'
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(resolve(rootDir, 'package.json'), 'utf-8'))
@@ -32,6 +33,11 @@ await esbuild.build({
 })
 
 assertTerminalRuntimeBundle(resolve(serverOutDir, 'index.js'), 'dist/server/index.js')
+
+const clientAssetStats = precompressClientAssets(resolve(rootDir, 'dist/client'))
+if (clientAssetStats.files) {
+  console.log(`[build-server] precompressed ${clientAssetStats.files} client assets (${(clientAssetStats.bytes / 1024 / 1024).toFixed(1)} MiB of gzip variants)`)
+}
 
 const bridgeOutDir = resolve(serverOutDir, 'agent-bridge', 'python')
 const bridgeSrcDir = resolve(rootDir, 'packages/server/src/modules/hermes/services/bridge/python')

@@ -1,5 +1,8 @@
 import type { Context, Middleware } from 'koa'
 import type { Readable } from 'stream'
+import { createReadStream, ReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { relative } from 'node:path'
 import {
   brotliCompressSync,
   constants as zlibConstants,
@@ -13,12 +16,16 @@ export type StaticCompressionEncoding = 'br' | 'gzip'
 export interface StaticCompressionOptions {
   minBytes?: number
   maxBrotliBytes?: number
+  precompressedRoot?: string
 }
 
 const DEFAULT_MIN_BYTES = 1024
+const MIN_PRECOMPRESSED_BYTES = 8 * 1024
 // Dynamic Brotli provides great ratios, but it can add seconds of TTFB on multi-megabyte
 // built assets. Cap it and fall back to gzip (or no compression) for larger responses.
 const DEFAULT_MAX_BROTLI_BYTES = 256 * 1024
+// For files without build-time variants, keep CPU work bounded on small boards.
+const DYNAMIC_BROTLI_QUALITY = 4
 
 const COMPRESSIBLE_TYPES = new Set([
   'application/ecmascript',
@@ -108,9 +115,7 @@ function parseBodyLength(ctx: Context, body: unknown): number | null {
 }
 
 function shouldCompress(ctx: Context, minBytes: number): boolean {
-  if (ctx.method === 'HEAD') return false
   if (ctx.status < 200 || ctx.status >= 300 || ctx.status === 204) return false
-  if (ctx.get('Range')) return false
   if (ctx.response.get('Content-Encoding')) return false
   if (!isCompressibleContentType(ctx.response.get('Content-Type') || ctx.type || '')) return false
 
@@ -125,7 +130,7 @@ function compressBuffer(body: Buffer, encoding: StaticCompressionEncoding): Buff
   if (encoding === 'br') {
     return brotliCompressSync(body, {
       params: {
-        [zlibConstants.BROTLI_PARAM_QUALITY]: zlibConstants.BROTLI_DEFAULT_QUALITY,
+        [zlibConstants.BROTLI_PARAM_QUALITY]: DYNAMIC_BROTLI_QUALITY,
       },
     })
   }
@@ -137,12 +142,30 @@ function createCompressionStream(encoding: StaticCompressionEncoding) {
   if (encoding === 'br') {
     return createBrotliCompress({
       params: {
-        [zlibConstants.BROTLI_PARAM_QUALITY]: zlibConstants.BROTLI_DEFAULT_QUALITY,
+        [zlibConstants.BROTLI_PARAM_QUALITY]: DYNAMIC_BROTLI_QUALITY,
       },
     })
   }
 
   return createGzip()
+}
+
+async function usePrecompressedGzip(ctx: Context, root: string, body: unknown): Promise<boolean> {
+  if (!(body instanceof ReadStream) || typeof body.path !== 'string') return false
+  const filename = relative(root, body.path).replaceAll('\\', '/')
+  if (!filename.startsWith('assets/') || !/\.(?:js|css)$/.test(filename)) return false
+
+  const variant = `${body.path}.gz`
+  const info = await stat(variant).catch(() => null)
+  if (!info?.isFile()) return false
+
+  if (ctx.method !== 'HEAD') {
+    body.destroy()
+    ctx.body = createReadStream(variant)
+  }
+  ctx.set('Content-Encoding', 'gzip')
+  ctx.set('Content-Length', String(info.size))
+  return true
 }
 
 export function createStaticCompressionMiddleware(options: StaticCompressionOptions = {}): Middleware {
@@ -157,11 +180,25 @@ export function createStaticCompressionMiddleware(options: StaticCompressionOpti
     const body = ctx.body
     const bodyLength = parseBodyLength(ctx, body)
     ctx.vary('Accept-Encoding')
-    const encoding = selectStaticCompressionEncoding(ctx.get('Accept-Encoding'), {
+    if (ctx.get('Range')) return
+
+    const accepted = ctx.get('Accept-Encoding')
+    const encoding = selectStaticCompressionEncoding(accepted, {
       bodyLength,
       maxBrotliBytes,
     })
     if (!encoding) return
+
+    // Prefer already-compressed bytes at equal quality; honor a client that
+    // prefers Brotli when the existing dynamic-size limit permits it.
+    if (options.precompressedRoot && bodyLength !== null && bodyLength >= MIN_PRECOMPRESSED_BYTES
+      && (encoding === 'gzip'
+      || (parseEncodingQuality(accepted, 'gzip') > 0
+        && parseEncodingQuality(accepted, 'gzip') === parseEncodingQuality(accepted, 'br')))) {
+      if (await usePrecompressedGzip(ctx, options.precompressedRoot, body)) return
+    }
+
+    if (ctx.method === 'HEAD') return
 
     ctx.set('Content-Encoding', encoding)
 
