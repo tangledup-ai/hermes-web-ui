@@ -33,6 +33,7 @@ should not duplicate server persistence rules.
 - Web UI state defaults to `~/.hermes-web-ui` through `config.appHome`.
 - `HERMES_WEB_UI_HOME` and `HERMES_WEBUI_STATE_DIR` override Web UI state location.
 - Hermes Agent state lives under Hermes profile directories and must stay distinct from Web UI state.
+- Source-deployed device services run as root, including their terminals, Agents and plugins. The provisioning account and its existing HOME and state paths remain unchanged; see `docs/harness/root-runtime.md`.
 - Uploads default to `config.uploadDir`, which is derived from the Web UI home unless `UPLOAD_DIR` is set.
 - Runtime data directories must also live under the Web UI home, not beside built `dist` assets.
 - Profile-scoped Hermes data should use existing profile helpers instead of manually joining paths.
