@@ -104,11 +104,12 @@ export const meetingASRApi = {
     return response.json()
   },
 
-  async start(config: MeetingASRConfig = {}, profile?: string): Promise<{ status: string } & MeetingASRStatus> {
+  async start(config: MeetingASRConfig = {}, profile?: string, signal?: AbortSignal): Promise<{ status: string } & MeetingASRStatus> {
     const response = await fetch(`${getBaseUrl()}${API_BASE}/start`, {
       method: 'POST',
       headers: getAuthHeaders(profile),
       body: JSON.stringify(config),
+      signal,
     })
     return response.json()
   },
@@ -221,6 +222,7 @@ export const meetingASRApi = {
   async startFileTranscription(
     file: Blob,
     options: FileTranscriptionOptions,
+    signal?: AbortSignal,
   ): Promise<{ job_id: string; status: string }> {
     const params = new URLSearchParams()
     params.set('engine', options.engine)
@@ -238,6 +240,7 @@ export const meetingASRApi = {
       method: 'POST',
       headers,
       body: file,
+      signal,
     })
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
@@ -250,9 +253,10 @@ export const meetingASRApi = {
     return response.json()
   },
 
-  async getFileTranscriptionStatus(jobId: string, profile?: string): Promise<FileTranscriptionJob> {
+  async getFileTranscriptionStatus(jobId: string, profile?: string, signal?: AbortSignal): Promise<FileTranscriptionJob> {
     const response = await fetch(`${getBaseUrl()}${API_BASE}/transcribe/status/${encodeURIComponent(jobId)}`, {
       headers: getAuthHeaders(profile),
+      signal,
     })
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
@@ -286,6 +290,7 @@ export class MeetingASRHttpError extends Error {
 }
 
 export interface FileTranscriptionOptions {
+  replaceDeviceTranscript?: boolean
   engine: TranscribeEngine
   profile?: string
   /** Request speaker labels (`speaker_id` on each sentence). */

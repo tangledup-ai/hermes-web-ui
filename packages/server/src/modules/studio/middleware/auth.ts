@@ -451,6 +451,7 @@ export async function requireUserJwt(ctx: Context, next: Next): Promise<void> {
       return
     }
     ctx.state.profile = { name: binding.profile }
+    ctx.state.runMcpAuthenticated = true
     await next()
     return
   }

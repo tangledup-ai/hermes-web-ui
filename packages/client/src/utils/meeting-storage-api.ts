@@ -17,6 +17,10 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 export interface MeetingData {
+  source?: MeetingSession['source']
+  markers?: MeetingSession['markers']
+  captureStatus?: MeetingSession['captureStatus']
+  transcriptIncomplete?: boolean
   id: string
   title: string
   createdAt: number
@@ -45,7 +49,7 @@ export const meetingStorageApi = {
       const response = await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}`, {
         headers: getAuthHeaders(),
       })
-      if (response.status === 404) return null
+      if (!response.ok) return null
       return response.json()
     } catch {
       return null
@@ -72,6 +76,7 @@ export const meetingStorageApi = {
     const response = await fetch(`${getBaseUrl()}${API_BASE}`, {
       headers: getAuthHeaders(),
     })
+    if (!response.ok) throw new Error(`Meeting list failed (${response.status})`)
     const data = await response.json()
     return data.meetings || []
   },
@@ -109,7 +114,7 @@ export const meetingStorageApi = {
       const response = await fetch(`${getBaseUrl()}${API_BASE}/${meetingId}/audio`, {
         headers: getAuthHeaders(),
       })
-      if (response.status === 404) return null
+      if (!response.ok) return null
       return response.blob()
     } catch {
       return null

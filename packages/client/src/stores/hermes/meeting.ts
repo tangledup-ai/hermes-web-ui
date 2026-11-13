@@ -1,9 +1,15 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, onScopeDispose, watch } from 'vue'
 import { saveAudioChunks, loadAudioChunks, deleteAudioChunks } from '@/utils/audio-db'
 import { meetingStorageApi } from '@/utils/meeting-storage-api'
+import { onAuthInvalidated } from '@/api/auth-invalidation'
+import { useProfilesStore } from './profiles'
 
 export interface MeetingSession {
+  source?: 'h618'
+  markers?: Array<{ offsetMs: number }>
+  captureStatus?: 'complete' | 'partial' | 'offline' | 'interrupted'
+  transcriptIncomplete?: boolean
   id: string
   title: string
   /** 是否由 AI 自动命名（首次分析/最终报告时置 true）。用户手动命名的会议保持 false，AI 永不覆盖。 */
@@ -144,7 +150,7 @@ function loadSessions(): MeetingSession[] {
     if (saved) {
       const sessions = JSON.parse(saved) as MeetingSession[]
       // 兼容旧数据：补全 speakers / analysisRounds 字段，移除 audioChunks
-      return sessions.map(s => ({
+      return sessions.filter(s => s.source !== 'h618').map(s => ({
         ...s,
         speakers: s.speakers || [],
         analysisRounds: s.analysisRounds || [],
@@ -156,9 +162,9 @@ function loadSessions(): MeetingSession[] {
 }
 
 function saveSessions(sessions: MeetingSession[], protectId?: string | null) {
+  const toSave = sessions.filter(session => session.source !== 'h618')
   try {
     // 不保存 audioChunks（已移除）和 speakers 到 localStorage
-    const toSave = sessions.map(({ ...rest }) => rest)
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
   } catch (e: any) {
     // localStorage quota exceeded (~5MB). Trim transcript sentences from the
@@ -166,7 +172,7 @@ function saveSessions(sessions: MeetingSession[], protectId?: string | null) {
     // masking new sessions never being persisted.
     if (e?.name === 'QuotaExceededError' || /quota/i.test(String(e?.message))) {
       console.warn('[meeting] localStorage quota exceeded; archiving oldest sessions')
-      archiveOldSessions(sessions, protectId)
+      archiveOldSessions(toSave, protectId)
     } else {
       console.warn('[meeting] Failed to save sessions to localStorage:', e)
     }
@@ -438,16 +444,25 @@ export const useMeetingStore = defineStore('meeting', () => {
   // localStorage 列表看不到这些会议; 这里把服务端会议合并进列表,
   // 让会议模式能直接点开查看触摸屏上启动的对话内容。
   async function syncSessionsFromServer(): Promise<void> {
+    const syncId = ++latestSyncId
     try {
       const ids = await meetingStorageApi.listMeetings()
+      if (syncId !== latestSyncId) return
+      sessions.value = sessions.value.filter(session => session.source !== 'h618' || ids.includes(session.id))
+      if (!sessions.value.some(session => session.id === activeSessionId.value)) activeSessionId.value = null
       let added = 0
       for (const id of ids) {
         if (sessions.value.some(s => s.id === id)) continue
         const data = await meetingStorageApi.getMeeting(id)
+        if (syncId !== latestSyncId) return
         if (!data) continue
         const now = Date.now()
         sessions.value.push({
           id: data.id,
+          source: data.source,
+          markers: data.markers,
+          captureStatus: data.captureStatus,
+          transcriptIncomplete: data.transcriptIncomplete,
           title: data.title || '会议',
           createdAt: data.createdAt || now,
           updatedAt: data.updatedAt || now,
@@ -480,6 +495,18 @@ export const useMeetingStore = defineStore('meeting', () => {
       console.error('[meeting] 同步服务端会议失败:', err)
     }
   }
+
+  let latestSyncId = 0
+
+  function clearDeviceSessions() {
+    latestSyncId += 1
+    sessions.value = sessions.value.filter(session => session.source !== 'h618')
+    if (!sessions.value.some(session => session.id === activeSessionId.value)) activeSessionId.value = null
+  }
+
+  onScopeDispose(onAuthInvalidated(clearDeviceSessions))
+  const profilesStore = useProfilesStore()
+  watch(() => profilesStore.activeProfileName, clearDeviceSessions)
 
   return {
     sessions,

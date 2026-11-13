@@ -694,17 +694,19 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
   // --- 音频播放 ---
   const audioElement = ref<HTMLAudioElement | null>(null)
 
-  function playAudio() {
+  function playAudio(offset?: number) {
     if (!audioUrl.value) return
 
     // 如果已经有 Audio 实例，直接继续播放
     if (audioElement.value) {
+      if (offset !== undefined) seekTo(offset)
       audioElement.value.play()
       isPlaying.value = true
       return
     }
 
     audioElement.value = new Audio(audioUrl.value)
+    if (offset !== undefined) audioElement.value.currentTime = offset
     audioElement.value.play()
     isPlaying.value = true
 
@@ -768,16 +770,23 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
 
   function seekTo(seconds: number) {
     if (!audioElement.value) return
-    audioElement.value.currentTime = Math.max(0, Math.min(seconds, playbackDuration.value))
+    const clamped = playbackDuration.value > 0 ? Math.min(seconds, playbackDuration.value) : seconds
+    audioElement.value.currentTime = Math.max(0, clamped)
     playbackTime.value = audioElement.value.currentTime
+    highlightCurrentSentence(playbackTime.value)
   }
 
   // 播放到指定句子结束时停止
   const playEndAt = ref<number | null>(null)
 
+  function playFrom(seconds: number) {
+    playEndAt.value = null
+    playAudio(seconds)
+  }
+
   function seekToSentence(index: number) {
     const sentence = deps.sentences.value[index]
-    if (!sentence?.startTime || !audioUrl.value) return
+    if (sentence?.startTime === undefined || !audioUrl.value) return
     // startTime 是毫秒，需要转换为秒
     const startTimeSec = sentence.startTime / 1000
     const endTimeSec = sentence.endTime ? sentence.endTime / 1000 : null
@@ -785,10 +794,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     // 设置结束时间
     playEndAt.value = endTimeSec
 
-    seekTo(startTimeSec)
-    if (!isPlaying.value) {
-      playAudio()
-    }
+    playAudio(startTimeSec)
   }
 
   // --- 进度条 ---
@@ -844,7 +850,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     // 使用 startTime 匹配（相对于音频开始的时间）
     for (let i = session.sentences.length - 1; i >= 0; i--) {
       const sentence = session.sentences[i]
-      if (sentence.startTime && sentence.startTime <= currentTimeMs) {
+      if (sentence.startTime !== undefined && sentence.startTime <= currentTimeMs) {
         if (highlightedSentenceIndex.value !== i) {
           highlightedSentenceIndex.value = i
 
@@ -891,6 +897,7 @@ export function useMeetingAudio(deps: UseMeetingAudioDeps) {
     togglePlayPause,
     stopAudio,
     seekTo,
+    playFrom,
     seekToSentence,
     seekToPosition,
     startProgressDrag,

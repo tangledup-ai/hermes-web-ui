@@ -404,7 +404,7 @@ async def ws_asr(ws: WebSocket) -> None:
         #   1. `provider` field on the WS start frame (per-session override)
         #   2. `settings.asr_provider` (env / hot config push)
         #   3. DashScope (default, backward-compatible)
-        requested_provider = str(start_msg.get("provider") or "").strip().lower()
+        requested_provider = ws.scope.get("studio_fixed_asr_provider") or str(start_msg.get("provider") or "").strip().lower()
         if requested_provider == "minimax" or (
             not requested_provider and settings.is_minimax_provider
         ):

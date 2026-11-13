@@ -7,6 +7,8 @@ export const meetingASRRoutes = new Router()
 meetingASRRoutes.post('/api/studio/meeting-asr/start', ctrl.startASRService)
 meetingASRRoutes.post('/api/studio/meeting-asr/stop', ctrl.stopASRService)
 meetingASRRoutes.get('/api/studio/meeting-asr/status', ctrl.getASRStatus)
+meetingASRRoutes.get('/api/studio/meeting-asr/device-consent', ctrl.readDeviceConsent)
+meetingASRRoutes.put('/api/studio/meeting-asr/device-consent', ctrl.updateDeviceConsent)
 
 // ASR service configuration
 meetingASRRoutes.post('/api/studio/meeting-asr/config', ctrl.updateASRConfig)

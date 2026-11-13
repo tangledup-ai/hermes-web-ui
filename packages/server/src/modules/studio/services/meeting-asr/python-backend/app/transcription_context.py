@@ -41,6 +41,8 @@ class TranscriptionContextMiddleware:
         settings_token = transcription_settings.set(config)
         owner_token = transcription_owner.set(owner)
         try:
+            if context.get("fixedProvider") is True:
+                scope["studio_fixed_asr_provider"] = config.asr_provider
             return await self.app(scope, receive, send)
         finally:
             transcription_owner.reset(owner_token)

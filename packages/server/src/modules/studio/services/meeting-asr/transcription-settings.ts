@@ -204,13 +204,14 @@ export async function meetingTranscriptionRequestContext(
   profile: string,
   userId?: number,
   mode: 'transcription' | 'realtime' | 'job-status' = 'transcription',
+  fixedProvider = false,
 ) {
   const config = mode === 'job-status' ? null : (await readEffectiveSettings(profile)).config
   if (config && mode === 'realtime') {
     config.dashscopeApiKey = readSharedRealtimeSettings(profile)?.secrets.apiKey || config.dashscopeApiKey
   }
   const settings = config ? Object.fromEntries(fieldNames.map(key => [fields[key][1], config[key]])) : {}
-  const context = { settings, owner: JSON.stringify([profile, userId ?? null]) }
+  const context = { settings, owner: JSON.stringify([profile, userId ?? null]), fixedProvider }
   return {
     provider: config?.asrProvider || 'dashscope',
     headers: {

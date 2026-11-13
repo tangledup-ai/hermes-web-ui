@@ -4188,6 +4188,18 @@ document: {
   },
 
   meeting: {
+    deviceConsent: "H618 即時轉錄授權",
+    deviceConsentDescription: "設定檔 {profile} 的 H618 即時轉錄會將會議音訊傳送至 {provider}。請確認是否允許。",
+    deviceConsentGranted: "已允許即時轉錄。",
+    deviceConsentDenied: "即時轉錄未授權。H618 可在本機錄音。",
+    deviceConsentError: "讀取或儲存授權失敗。",
+    deviceConsentRetry: "重試",
+    deviceConsentAllow: "允許即時轉錄",
+    deviceConsentRevoke: "撤銷授權",
+    deviceMarker: "從 {time} 開始播放",
+    deviceIncomplete: "H618 會議轉錄不完整。",
+    deviceRetranscribe: "轉錄已儲存的錄音",
+    deviceRetranscribeConfirm: "將錄音傳送至 {provider}，並在成功後取代轉錄？",
     actionItems: '待辦事項',
     agentChat: 'Agent 對話',
     agentConfig: 'Agent 設定',

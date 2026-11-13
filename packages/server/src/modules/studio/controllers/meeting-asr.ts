@@ -7,6 +7,9 @@ import { REPORT_FALLBACK_MARKER, type MeetingAnalysisTarget } from '../services/
 import { logger } from '../public/logging'
 import { MeetingProfileError, resolveMeetingProfile, resolveMeetingRequestProfile } from '../services/meeting-asr/profile'
 import {
+  DEVICE_SOURCE_HEADER, getDeviceConsent, isH618MeetingSource, requireMeetingAccount, setDeviceConsent,
+} from '../services/meeting-asr/device-consent'
+import {
   meetingTranscriptionRequestContext,
   MeetingTranscriptionSettingsError,
   readMeetingTranscriptionSetting,
@@ -149,6 +152,18 @@ function respondTranscriptionError(ctx: Context, error: unknown, status = 500): 
 // Service lifecycle
 export async function startASRService(ctx: Context): Promise<void> {
   try {
+    if (isH618MeetingSource(ctx.get?.(DEVICE_SOURCE_HEADER))) {
+      const { userId, profile } = requireMeetingAccount(ctx)
+      const consent = await getDeviceConsent(userId, profile)
+      if (!consent.granted) {
+        ctx.status = 403
+        ctx.body = { error: 'device_consent_required', ...consent }
+        return
+      }
+      await meetingASRService.start({})
+      ctx.body = { status: 'started', ...meetingASRService.status }
+      return
+    }
     const profile = resolveMeetingRequestProfile(ctx)
     const config = (ctx.request.body ?? {}) as Parameters<typeof meetingASRService.start>[0]
     const saveLegacy = prepareLegacyMeetingTranscriptionSave(profile, config, { allowCustomEndpoints: ctx.state?.user?.role === 'super_admin' })
@@ -157,6 +172,32 @@ export async function startASRService(ctx: Context): Promise<void> {
     await meetingASRService.start(profile === 'default' ? config : {})
     saveLegacy()
     ctx.body = { status: 'started', ...meetingASRService.status }
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
+  }
+}
+
+export async function readDeviceConsent(ctx: Context): Promise<void> {
+  try {
+    const { userId, profile } = requireMeetingAccount(ctx)
+    ctx.body = await getDeviceConsent(userId, profile)
+  } catch (error) {
+    respondTranscriptionError(ctx, error)
+  }
+}
+
+export async function updateDeviceConsent(ctx: Context): Promise<void> {
+  try {
+    const { userId, profile } = requireMeetingAccount(ctx)
+    const input = ctx.request.body as { provider?: unknown; granted?: unknown } | undefined
+    const consent = await getDeviceConsent(userId, profile)
+    if (input?.provider !== consent.provider || typeof input.granted !== 'boolean') {
+      ctx.status = 409
+      ctx.body = { error: 'device_provider_changed', ...consent }
+      return
+    }
+    setDeviceConsent(userId, profile, consent.provider, input.granted)
+    ctx.body = { ...consent, granted: input.granted }
   } catch (error) {
     respondTranscriptionError(ctx, error)
   }

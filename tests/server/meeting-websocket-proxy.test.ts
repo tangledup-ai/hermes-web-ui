@@ -6,6 +6,7 @@ const runtime = vi.hoisted(() => ({
   asrPort: 0, diarizePort: 0,
   ensureReady: vi.fn(async () => {}),
   contexts: [] as unknown[],
+  consent: false,
 }))
 vi.mock('../../packages/server/src/modules/studio/public/auth', () => ({
   isAuthEnabled: async () => true,
@@ -23,7 +24,14 @@ vi.mock('../../packages/server/src/modules/studio/services/realtime-backend', ()
   ensureRealtimeBackendReady: runtime.ensureReady,
 }))
 vi.mock('../../packages/server/src/modules/studio/public/logging', () => ({ logger: { warn: vi.fn(), error: vi.fn() } }))
+vi.mock('../../packages/server/src/modules/studio/repositories/meeting-device-consent-store', () => ({
+  getDeviceConsentRow: (userId: number, profile: string) => runtime.consent && userId === 1 && profile === 'work',
+  writeDeviceConsentRow: (userId: number, profile: string, _provider: string, granted: boolean) => {
+    if (userId === 1 && profile === 'work') runtime.consent = granted
+  },
+}))
 import { setupMeetingWebSocketProxy } from '../../packages/server/src/bootstrap/meeting-websocket'
+import { setDeviceConsent } from '../../packages/server/src/modules/studio/services/meeting-asr/device-consent'
 
 const servers: Server[] = []
 const sockets: WebSocket[] = []
@@ -52,6 +60,7 @@ afterEach(async () => {
   backends.splice(0).forEach(server => server.close())
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
   runtime.contexts.length = 0
+  runtime.consent = false
   vi.clearAllMocks()
 })
 
@@ -111,4 +120,34 @@ it.each(['meeting-user', 'meeting-server-token'])('accepts valid credentials wit
   })
   expect(message).toBe('asr:/ws/asr?profile=default')
   expect(runtime.contexts).toMatchObject([{ owner: JSON.stringify(['default', token === 'meeting-user' ? 1 : null]) }])
+})
+
+it('requires account consent on native H618 loopback and forwards a signed fixed-provider context', async () => {
+  const port = await proxyServer()
+  const connect = (token?: string) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/asr`, {
+      headers: { 'X-Keli-Device': 'h618', 'X-Hermes-Profile': 'work', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    })
+    sockets.push(socket)
+    const response = new Promise<number | string | undefined>((resolve, reject) => {
+      socket.once('unexpected-response', (_, response) => { response.resume(); resolve(response.statusCode) })
+      socket.once('message', value => resolve(String(value)))
+      socket.once('error', reject)
+    })
+    return { socket, response }
+  }
+  expect(await connect().response).toBe(401)
+  expect(await connect('meeting-server-token').response).toBe(401)
+  expect(await connect('meeting-user').response).toBe(403)
+  expect(runtime.contexts).toHaveLength(0)
+  runtime.consent = true
+  const active = connect('meeting-user')
+  expect(await active.response).toBe('asr:/ws/asr')
+  expect(runtime.contexts).toMatchObject([{ owner: JSON.stringify(['work', 1]), fixedProvider: true }])
+  setDeviceConsent(2, 'work', 'dashscope', false)
+  expect(active.socket.readyState).toBe(WebSocket.OPEN)
+  const closed = new Promise<void>(resolve => active.socket.once('close', () => resolve()))
+  setDeviceConsent(1, 'work', 'dashscope', false)
+  await closed
+  expect(await connect('meeting-user').response).toBe(403)
 })

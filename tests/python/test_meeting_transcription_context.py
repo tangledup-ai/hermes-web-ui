@@ -25,8 +25,12 @@ class TranscriptionContextTest(unittest.IsolatedAsyncioTestCase):
             if name == "app" or name.startswith("app."):
                 del sys.modules[name]
 
-    def scope(self, owner, key, token=b"test-token", request_type="http"):
-        context = {"owner": owner, "settings": {"dashscope_api_key": key}}
+    def scope(self, owner, key, token=b"test-token", request_type="http", fixed_provider=False):
+        context = {
+            "owner": owner,
+            "settings": {"dashscope_api_key": key, "asr_provider": "minimax"},
+            "fixedProvider": fixed_provider,
+        }
         return {
             "type": request_type,
             "headers": [
@@ -59,6 +63,18 @@ class TranscriptionContextTest(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual(await asyncio.gather(*tasks), ["work-key", "personal-key"])
         self.assertEqual(self.config.settings.dashscope_api_key, default_key)
         self.assertIsNone(self.config.transcription_owner.get())
+
+    async def test_h618_provider_is_fixed_only_for_authenticated_device_context(self):
+        observed = []
+
+        async def app(scope, receive, send):
+            observed.append(scope.get("studio_fixed_asr_provider"))
+
+        with patch.dict("os.environ", {"STUDIO_TRANSCRIPTION_TOKEN": "test-token"}):
+            middleware = self.context.TranscriptionContextMiddleware(app)
+        await middleware(self.scope("work", "key", request_type="websocket", fixed_provider=True), None, None)
+        await middleware(self.scope("work", "key", request_type="websocket"), None, None)
+        self.assertEqual(observed, ["minimax", None])
 
     async def test_rejects_forged_context_and_hides_other_accounts_jobs(self):
         responses = []

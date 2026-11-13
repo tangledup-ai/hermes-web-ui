@@ -12,6 +12,7 @@ meetingStorageRoutes.get('/api/studio/meeting-storage', ctrl.listMeetings)
 // Audio
 meetingStorageRoutes.post('/api/studio/meeting-storage/:meetingId/audio', ctrl.uploadAudio)
 meetingStorageRoutes.get('/api/studio/meeting-storage/:meetingId/audio', ctrl.downloadAudio)
+meetingStorageRoutes.put('/api/studio/meeting-storage/:meetingId/device-recording', ctrl.uploadDeviceRecording)
 
 // Transcript
 meetingStorageRoutes.put('/api/studio/meeting-storage/:meetingId/transcript', ctrl.saveTranscript)

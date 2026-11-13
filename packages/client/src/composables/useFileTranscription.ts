@@ -48,10 +48,11 @@ export function useFileTranscription(deps: UseFileTranscriptionDeps) {
   const phase = ref('')
   const errorMessage = ref('')
 
-  let cancelled = false
+  let activeRun: AbortController | null = null
 
   function stop() {
-    cancelled = true
+    activeRun?.abort()
+    activeRun = null
     isTranscribing.value = false
     phase.value = ''
   }
@@ -60,18 +61,20 @@ export function useFileTranscription(deps: UseFileTranscriptionDeps) {
     return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
-  async function pollUntilDone(jobId: string, profile?: string): Promise<FileTranscriptionJob> {
+  async function pollUntilDone(jobId: string, profile: string | undefined, signal: AbortSignal): Promise<FileTranscriptionJob> {
     const deadline = Date.now() + MAX_POLL_MS
     let transientSince: number | null = null
 
     for (;;) {
-      if (cancelled) throw new Error('cancelled')
+      signal.throwIfAborted()
 
       let job: FileTranscriptionJob
       try {
-        job = await meetingASRApi.getFileTranscriptionStatus(jobId, profile)
+        job = await meetingASRApi.getFileTranscriptionStatus(jobId, profile, signal)
+        signal.throwIfAborted()
         transientSince = null
       } catch (err) {
+        signal.throwIfAborted()
         const status = err instanceof MeetingASRHttpError ? err.status : 0
         // 404: the job registry lives in the Python process, so a restart
         // wipes it — retrying cannot recover, report it precisely.
@@ -100,38 +103,41 @@ export function useFileTranscription(deps: UseFileTranscriptionDeps) {
   }
 
   async function transcribe(file: Blob, options: FileTranscriptionOptions): Promise<boolean> {
-    if (isTranscribing.value) return false
-    cancelled = false
+    if (activeRun) return false
+    const run = new AbortController()
+    activeRun = run
     isTranscribing.value = true
     progress.value = 0
     phase.value = 'uploading'
     errorMessage.value = ''
 
     try {
-      const started = await meetingASRApi.startFileTranscription(file, options)
+      const started = await meetingASRApi.startFileTranscription(file, options, run.signal)
+      run.signal.throwIfAborted()
       phase.value = 'transcribing'
-      const job = await pollUntilDone(started.job_id, options.profile)
-      if (cancelled) return false
+      const job = await pollUntilDone(started.job_id, options.profile, run.signal)
+      run.signal.throwIfAborted()
       if (!job.result) throw new Error('transcription returned no result')
       progress.value = 1
       await deps.onComplete(job.result, options)
       return true
     } catch (err: any) {
-      if (err?.message === 'cancelled') return false
+      if (run.signal.aborted) return false
       const status = err instanceof MeetingASRHttpError ? err.status : undefined
       const message = err?.message || String(err) || 'transcription failed'
       errorMessage.value = message
       deps.onError?.(message, status)
       return false
     } finally {
-      isTranscribing.value = false
-      phase.value = ''
+      if (activeRun === run) {
+        activeRun = null
+        isTranscribing.value = false
+        phase.value = ''
+      }
     }
   }
 
-  onUnmounted(() => {
-    cancelled = true
-  })
+  onUnmounted(stop)
 
   return { isTranscribing, progress, phase, errorMessage, transcribe, stop }
 }

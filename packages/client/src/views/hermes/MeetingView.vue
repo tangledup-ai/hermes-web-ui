@@ -2,7 +2,7 @@
 import { ref, watch, onMounted, onUnmounted, computed, nextTick, defineAsyncComponent } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NAlert, NButton, NSpin, NTag, NTooltip, NInput, NPopconfirm, NSelect, NTabs, NTabPane } from 'naive-ui'
+import { NAlert, NButton, NModal, NSpace, NSpin, NTag, NTooltip, NInput, NPopconfirm, NSelect, NTabs, NTabPane } from 'naive-ui'
 import MeetingAgentPanel from '@/components/hermes/meeting/MeetingAgentPanel.vue'
 import SceneTemplatePicker from '@/components/hermes/meeting/SceneTemplatePicker.vue'
 import WaveformCanvas from '@/components/hermes/meeting/WaveformCanvas.vue'
@@ -20,11 +20,12 @@ import { useMeetingStore } from '@/stores/hermes/meeting'
 import type { MeetingSession, TranscriptSentence, AgentConfig, SpeechEvalState } from '@/stores/hermes/meeting'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { DEFAULT_EVAL, provideSpeechTimer } from '@/components/hermes/meeting/speech/speechTimerContext'
-import type { MeetingTranscriptionSetting } from '@/api/studio/meeting-transcription'
+import { meetingDeviceConsent, type MeetingDeviceConsent, type MeetingTranscriptionSetting } from '@/api/studio/meeting-transcription'
+import { onAuthInvalidated } from '@/api/auth-invalidation'
 import { loadMeetingTranscriptionSetting } from '@/utils/meeting-transcription-settings'
 import { resolveMeetingAgent } from '@/utils/meeting-agent-config'
 import { meetingASRApi } from '@/utils/meeting-asr-api'
-import { request } from '@/api/client'
+import { getApiKey, getBaseUrl, request } from '@/api/client'
 import { useMessage } from '@/composables/useAppMessage'
 import { meetingStorageApi } from '@/utils/meeting-storage-api'
 import { extractMeetingTitleFromReport, requestAiMeetingTitle, formatTranscriptForTitle, canAutoRenameMeeting } from '@/utils/meeting-title'
@@ -69,6 +70,39 @@ const agentTypeOptions = [
 ]
 
 const activeProfile = computed(() => profilesStore.activeProfileName || 'default')
+const showDeviceConsent = ref(false)
+const consent = ref<MeetingDeviceConsent | null>(null)
+const consentBusy = ref(false)
+const consentFailed = ref(false)
+let consentRequest = 0
+
+async function updateConsent(granted?: boolean) {
+  const profile = activeProfile.value
+  const previous = consent.value
+  if (granted !== undefined && (!previous || previous.profile !== profile)) return
+  const requestId = ++consentRequest
+  consentBusy.value = true
+  consentFailed.value = false
+  try {
+    const next = await meetingDeviceConsent(profile, previous && granted !== undefined
+      ? { provider: previous.provider, granted }
+      : undefined)
+    if (requestId === consentRequest) consent.value = next
+  } catch {
+    if (requestId === consentRequest) {
+      consent.value = null
+      consentFailed.value = true
+    }
+  } finally {
+    if (requestId === consentRequest) consentBusy.value = false
+  }
+}
+
+function openDeviceConsent() {
+  consent.value = null
+  showDeviceConsent.value = true
+  void updateConsent()
+}
 const transcriptionSetting = ref<MeetingTranscriptionSetting | null>(null)
 const transcriptionSettingError = ref(false)
 let transcriptionLoadId = 0
@@ -150,6 +184,18 @@ const showReport = ref(false)
 // --- Agent 分析相关 ---
 const showAgentPanel = ref(true)
 const pendingMeetingWrites = new Map<string, Promise<void>>()
+let meetingScopeRevision = 0
+let meetingLoadId = 0
+let loadedDeviceMeeting = false
+
+function checkMeetingScope() {
+  const revision = meetingScopeRevision
+  const profile = activeProfile.value
+  const apiKey = getApiKey()
+  const baseUrl = getBaseUrl()
+  return () => revision === meetingScopeRevision && profile === activeProfile.value
+    && apiKey === getApiKey() && baseUrl === getBaseUrl()
+}
 const assistPanelRef = ref<InstanceType<typeof MeetingAgentPanel> | null>(null)
 
 // --- 新建会议：采集方式选项卡（实时语音 / 直接音频转录） ---
@@ -180,6 +226,7 @@ const {
   progressPercent,
   highlightedSentenceIndex,
   togglePlayPause,
+  playFrom,
   seekToSentence,
   seekToPosition,
   startProgressDrag,
@@ -216,15 +263,22 @@ const { downloadAudio, downloadTranscript, downloadTranscriptMarkdown, downloadJ
 // 两个入口共用一个上传 + 轮询 + 合并流程：录音完成后按发言人重新标注，
 // 或把上传的整段音频直接识别成会议转写。
 const lastTranscribeWasDiarize = ref(true)
-const { isTranscribing, progress: transcribeProgress, transcribe } = useFileTranscription({
+const { isTranscribing, progress: transcribeProgress, transcribe, stop: stopFileTranscription } = useFileTranscription({
   onComplete: async (result, options) => {
     const session = meetingStore.sessions.find(item => item.id === options.sessionId)
     if (!session) return
-    const { changed, ...updated } = applyFileTranscriptionResult(session, result.sentences, !!options.diarize)
+    const replace = options.replaceDeviceTranscript && session.source === 'h618'
+    const input = replace ? { ...session, sentences: [] } : session
+    const { changed, ...updated } = applyFileTranscriptionResult(input, result.sentences, !!options.diarize)
+    if (replace && !updated.sentences.length) {
+      message.warning(t('meeting.diarizeNoNewSentences'))
+      return
+    }
     meetingStore.updateSession(session.id, {
       ...updated,
       audioDuration: result.duration_sec || session.audioDuration,
       status: 'completed',
+      transcriptIncomplete: replace ? false : session.transcriptIncomplete,
     })
     if (meetingStore.activeSessionId === session.id) {
       finalSentences.value = [...updated.sentences]
@@ -289,7 +343,13 @@ function defaultFileEngine(): DiarizeEngine {
     : 'qwen'
 }
 
+const fileEngineConfiguredForDevice = computed(() => defaultFileEngine() === 'minimax'
+  ? transcriptionSetting.value?.minimaxKeyConfigured
+  : transcriptionSetting.value?.dashscopeKeyConfigured,
+)
+
 const isPreparingTranscription = ref(false)
+let transcriptionPreparation: AbortController | null = null
 const transcriptionBusy = computed(() => isPreparingTranscription.value || isTranscribing.value)
 
 function openDiarizeDialog() {
@@ -302,11 +362,21 @@ function openDiarizeDialog() {
 
 async function transcribeMeetingFile(file: Blob, options: Parameters<typeof transcribe>[1]) {
   if (transcriptionBusy.value) return
+  const preparation = new AbortController()
+  const sameScope = checkMeetingScope()
+  transcriptionPreparation = preparation
   isPreparingTranscription.value = true
   try {
-    if (await startASRService(options.profile)) await transcribe(file, options)
+    if (await startASRService(options.profile, preparation.signal) && sameScope()
+      && !preparation.signal.aborted) {
+      const session = meetingStore.sessions.find(item => item.id === options.sessionId)
+      if (session) await transcribe(file, options)
+    }
   } finally {
-    isPreparingTranscription.value = false
+    if (transcriptionPreparation === preparation) {
+      transcriptionPreparation = null
+      isPreparingTranscription.value = false
+    }
   }
 }
 
@@ -322,6 +392,26 @@ function onDiarizeStart(payload: { engine: DiarizeEngine; speakerCount: number }
     sessionId,
     profile: activeProfile.value,
   })
+}
+
+function retranscribeDeviceAudio() {
+  const session = meetingStore.activeSession
+  const blob = audioBlob.value
+  if (!session || session.source !== 'h618' || !blob || !session.transcriptIncomplete) return
+  const engine = defaultFileEngine()
+  lastTranscribeWasDiarize.value = false
+  void transcribeMeetingFile(blob, {
+    engine,
+    diarize: false,
+    sessionId: session.id,
+    profile: activeProfile.value,
+    replaceDeviceTranscript: true,
+  })
+}
+
+function markerTime(offsetMs: number): string {
+  const seconds = Math.floor(offsetMs / 1000)
+  return [Math.floor(seconds / 60), seconds % 60].map(value => String(value).padStart(2, '0')).join(':')
 }
 
 function runDirectTranscription(sessionId: string, file: File) {
@@ -536,22 +626,36 @@ function selectMeetingById(sessionId: string) {
 
 async function loadMeeting(session: MeetingSession) {
   if (isConnecting.value) return
+  const loadId = ++meetingLoadId
+  const sameScope = checkMeetingScope()
   if (isRecording.value) await stopRecording()
+  if (loadId !== meetingLoadId || !sameScope()) return
   meetingStore.setActiveSession(session.id)
+  loadedDeviceMeeting = session.source === 'h618'
+  clearPlaybackAudio()
+  const isCurrent = () => loadId === meetingLoadId && sameScope() && meetingStore.activeSessionId === session.id
   await pendingMeetingWrites.get(session.id)
-  if (meetingStore.activeSessionId !== session.id) return
+  if (!isCurrent()) return
   session = meetingStore.sessions.find(item => item.id === session.id) || session
   
   // 从服务器加载数据
   try {
     const serverData = await meetingStorageApi.getMeeting(session.id)
-    if (meetingStore.activeSessionId !== session.id) return
+    if (!isCurrent()) return
     if (serverData) {
       finalSentences.value = serverData.sentences || []
       analysisResult.value = serverData.analysisResult
       htmlContent.value = serverData.htmlContent || ''
       speakerMap.value = serverData.speakerMap || {}
       useDiarize.value = HIDE_SPEAKER_DIARIZATION ? false : (serverData.useDiarize || false)
+      if (serverData.source === 'h618') {
+        loadedDeviceMeeting = true
+        meetingStore.updateSession(session.id, {
+          markers: serverData.markers,
+          captureStatus: serverData.captureStatus,
+          transcriptIncomplete: serverData.transcriptIncomplete,
+        })
+      }
     } else {
       // 如果服务器没有数据，使用本地数据
       finalSentences.value = [...session.sentences]
@@ -561,7 +665,7 @@ async function loadMeeting(session: MeetingSession) {
       useDiarize.value = HIDE_SPEAKER_DIARIZATION ? false : session.useDiarize
     }
   } catch (err) {
-    if (meetingStore.activeSessionId !== session.id) return
+    if (!isCurrent()) return
     console.error('Failed to load meeting from server:', err)
     // 回退到本地数据
     finalSentences.value = [...session.sentences]
@@ -583,17 +687,24 @@ async function loadMeeting(session: MeetingSession) {
   partialText.value = ''
   errorMessage.value = ''
   highlightedSentenceIndex.value = -1
-  stopAudio()
-  
+
   // 加载音频数据
-  await loadAudioForSession(session.id)
+  await loadAudioForSession(session.id, isCurrent)
 }
 
-async function loadAudioForSession(sessionId: string) {
+function clearPlaybackAudio() {
+  stopAudio()
+  if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
+  audioUrl.value = ''
+  audioBlob.value = null
+  playbackDuration.value = 0
+}
+
+async function loadAudioForSession(sessionId: string, isCurrent: () => boolean) {
   try {
     // 从服务器加载音频
     const blob = await meetingStorageApi.downloadAudio(sessionId)
-    if (meetingStore.activeSessionId !== sessionId) return
+    if (!isCurrent()) return
     if (blob) {
       audioBlob.value = blob
       audioUrl.value = URL.createObjectURL(blob)
@@ -604,8 +715,8 @@ async function loadAudioForSession(sessionId: string) {
   }
   
   // 回退到 IndexedDB
-  const blob = await meetingStore.getAudioBlob(sessionId)
-  if (meetingStore.activeSessionId !== sessionId) return
+  const blob = meetingStore.activeSession?.source === 'h618' ? null : await meetingStore.getAudioBlob(sessionId)
+  if (!isCurrent()) return
   if (blob) {
     audioBlob.value = blob
     audioUrl.value = URL.createObjectURL(blob)
@@ -631,6 +742,8 @@ async function deleteMeeting(id: string) {
 }
 
 function resetMeetingState() {
+  meetingLoadId += 1
+  loadedDeviceMeeting = false
   finalSentences.value = []
   analysisResult.value = null
   htmlContent.value = ''
@@ -641,7 +754,7 @@ function resetMeetingState() {
   isConnecting.value = false
   statusText.value = ''
   highlightedSentenceIndex.value = -1
-  stopAudio()
+  clearPlaybackAudio()
 }
 
 async function saveCurrentMeeting() {
@@ -666,8 +779,11 @@ async function persistMeeting(meetingId: string) {
   const meeting = meetingStore.sessions.find(session => session.id === meetingId)
   if (!meeting) return
   const previous = pendingMeetingWrites.get(meetingId) || Promise.resolve()
+  const sameScope = checkMeetingScope()
   const pending = previous.then(async () => {
+    if (meeting.source === 'h618' && !sameScope()) return
     await meetingStorageApi.saveMeeting(meetingId, meeting)
+    if (meeting.source === 'h618' && !sameScope()) return
     await meetingStorageApi.saveTranscript(meetingId, meeting.sentences)
   }).catch((err) => {
     console.error('[meeting] failed to save meeting:', err)
@@ -705,26 +821,29 @@ async function checkASRServiceStatus() {
   }
 }
 
-async function startASRService(profile = activeProfile.value) {
+async function startASRService(profile = activeProfile.value, signal?: AbortSignal) {
   isStartingASR.value = true
   asrServiceError.value = ''
   statusText.value = t('meeting.startup.starting')
 
   try {
     await transcriptionLoad
-    const result = await meetingASRApi.start({}, profile)
+    if (signal?.aborted) return false
+    const result = await meetingASRApi.start({}, profile, signal)
+    if (signal?.aborted) return false
     if (result.status !== 'started' && result.status !== 'already_running') {
       throw new Error(result.error || t('meeting.startup.error'))
     }
     asrServiceStatus.value = { ...result, isRunning: true }
     return true
   } catch (err) {
+    if (signal?.aborted) return false
     asrServiceError.value = err instanceof Error ? err.message : t('meeting.startup.error')
     console.error('[meeting] ASR service start error:', err)
     message.error(asrServiceError.value)
     return false
   } finally {
-    isStartingASR.value = false
+    if (!signal?.aborted) isStartingASR.value = false
   }
 }
 
@@ -739,8 +858,44 @@ async function startRealtimeTranscription(profile: string) {
   return startASRService(profile)
 }
 
+function syncFocusedMeetings() {
+  if (document.visibilityState === 'visible') void meetingStore.syncSessionsFromServer()
+}
+
+function cancelScopedTranscription() {
+  meetingScopeRevision += 1
+  if (transcriptionPreparation) {
+    transcriptionPreparation.abort()
+    transcriptionPreparation = null
+    isPreparingTranscription.value = false
+    isStartingASR.value = false
+  }
+  stopFileTranscription()
+}
+
+function clearScopedMeetings() {
+  cancelScopedTranscription()
+  consentRequest += 1
+  consent.value = null
+  consentBusy.value = false
+  showDeviceConsent.value = false
+  if (loadedDeviceMeeting || meetingStore.activeSession?.source === 'h618') {
+    resetMeetingState()
+  }
+}
+
+watch(activeProfile, () => {
+  clearScopedMeetings()
+  syncFocusedMeetings()
+})
+
+let unsubscribeAuth = () => {}
+
 // --- 生命周期 ---
 onMounted(async () => {
+  unsubscribeAuth = onAuthInvalidated(clearScopedMeetings)
+  window.addEventListener('focus', syncFocusedMeetings)
+  document.addEventListener('visibilitychange', syncFocusedMeetings)
   await Promise.all([
     profilesStore.fetchProfiles(),
     checkASRServiceStatus(),
@@ -755,6 +910,10 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  cancelScopedTranscription()
+  unsubscribeAuth()
+  window.removeEventListener('focus', syncFocusedMeetings)
+  document.removeEventListener('visibilitychange', syncFocusedMeetings)
   stopRecording()
   stopSpeechTimer()
   // Note: We don't stop the ASR service on unmount as it should persist across page navigations
@@ -989,6 +1148,37 @@ async function clearTranscript() {
         @update:speaker-count="speakerCount = $event"
         @clear-transcript="clearTranscript"
       />
+      <div class="device-meeting-actions">
+        <NButton size="small" quaternary data-testid="meeting-device-consent" @click="openDeviceConsent">
+          {{ t('meeting.deviceConsent') }}
+        </NButton>
+      </div>
+      <NModal v-model:show="showDeviceConsent" preset="dialog" :title="t('meeting.deviceConsent')">
+        <NSpin :show="consentBusy">
+          <NAlert v-if="consentFailed" type="error">{{ t('meeting.deviceConsentError') }}</NAlert>
+          <template v-else-if="consent">
+            <p>{{ t('meeting.deviceConsentDescription', {
+              profile: consent.profile,
+              provider: t(consent.provider === 'minimax' ? 'meeting.asrProviderMinimax' : 'meeting.asrProviderDashscope'),
+            }) }}</p>
+            <NAlert :type="consent.granted ? 'success' : 'info'">
+              {{ t(consent.granted ? 'meeting.deviceConsentGranted' : 'meeting.deviceConsentDenied') }}
+            </NAlert>
+          </template>
+        </NSpin>
+        <template #action>
+          <NButton v-if="consentFailed" @click="updateConsent()">{{ t('meeting.deviceConsentRetry') }}</NButton>
+          <NButton
+            v-else-if="consent"
+            :loading="consentBusy"
+            :type="consent.granted ? 'default' : 'primary'"
+            data-testid="meeting-device-consent-toggle"
+            @click="updateConsent(!consent.granted)"
+          >
+            {{ t(consent.granted ? 'meeting.deviceConsentRevoke' : 'meeting.deviceConsentAllow') }}
+          </NButton>
+        </template>
+      </NModal>
 
       <!-- 主内容区 -->
       <div class="meeting-content">
@@ -1043,6 +1233,36 @@ async function clearTranscript() {
           </div>
         </div>
 
+        <div v-if="activeSession?.source === 'h618'" class="device-meeting-actions">
+          <NSpace align="center">
+            <NTag size="small">H618</NTag>
+            <NButton
+              v-for="(marker, index) in activeSession.markers"
+              :key="index"
+              size="tiny"
+              :disabled="!audioUrl"
+              :aria-label="t('meeting.deviceMarker', { time: markerTime(marker.offsetMs) })"
+              data-testid="meeting-device-marker"
+              @click="playFrom(marker.offsetMs / 1000)"
+            >{{ markerTime(marker.offsetMs) }}</NButton>
+          </NSpace>
+          <NAlert v-if="activeSession.transcriptIncomplete" type="warning">
+            {{ t('meeting.deviceIncomplete') }}
+            <NPopconfirm @positive-click="retranscribeDeviceAudio">
+              <template #trigger>
+                <NButton
+                  size="small"
+                  :disabled="!audioBlob || transcriptionBusy || !fileEngineConfiguredForDevice"
+                  data-testid="meeting-device-retranscribe"
+                >{{ t('meeting.deviceRetranscribe') }}</NButton>
+              </template>
+              {{ t('meeting.deviceRetranscribeConfirm', {
+                provider: t(defaultFileEngine() === 'minimax' ? 'meeting.asrProviderMinimax' : 'meeting.asrProviderDashscope'),
+              }) }}
+            </NPopconfirm>
+          </NAlert>
+        </div>
+
         <!-- 转写内容（拆分自 MeetingView 主体） -->
         <TranscriptList
           :sentences="sentences"
@@ -1057,6 +1277,7 @@ async function clearTranscript() {
         <!-- 录音按钮 -->
         <div class="record-button-container">
           <button
+            v-if="activeSession?.source !== 'h618'"
             class="record-button"
             :class="{ recording: isRecording, connecting: isConnecting }"
             :aria-label="isRecording ? t('meeting.stop') : (isConnecting ? t('meeting.connecting') : t('meeting.start'))"
@@ -1546,6 +1767,10 @@ async function clearTranscript() {
 
 <style scoped lang="scss">
 @use "@/styles/variables" as *;
+
+.device-meeting-actions {
+  padding: 0.25rem 0.75rem;
+}
 
 .meeting-view {
   display: flex;

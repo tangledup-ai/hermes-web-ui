@@ -1937,6 +1937,13 @@ export const REALTIME_PROFILE_SETTINGS_SCHEMA: Record<string, string> = {
 }
 
 export const MEETING_TRANSCRIPTION_SETTINGS_TABLE = 'meeting_transcription_settings'
+export const MEETING_DEVICE_CONSENT_TABLE = 'meeting_device_consent'
+
+const MEETING_DEVICE_CONSENT_SCHEMA: Record<string, string> = {
+  user_id: 'INTEGER NOT NULL',
+  profile: 'TEXT NOT NULL',
+  provider: 'TEXT NOT NULL',
+}
 
 const MEETING_TRANSCRIPTION_SETTINGS_SCHEMA: Record<string, string> = {
   profile: 'TEXT PRIMARY KEY',
@@ -1956,6 +1963,9 @@ export function initAllHermesTables(): void {
     })
     syncTable(REALTIME_PROFILE_SETTINGS_TABLE, REALTIME_PROFILE_SETTINGS_SCHEMA)
     syncTable(MEETING_TRANSCRIPTION_SETTINGS_TABLE, MEETING_TRANSCRIPTION_SETTINGS_SCHEMA)
+    syncTable(MEETING_DEVICE_CONSENT_TABLE, MEETING_DEVICE_CONSENT_SCHEMA, {
+      primaryKey: 'user_id, profile, provider',
+    })
     syncTable(USB_EVENTS_TABLE, USB_EVENTS_SCHEMA, { indexes: USB_EVENTS_INDEXES })
 
     syncTable(USAGE_TABLE, USAGE_SCHEMA, { primaryKey: 'id' })

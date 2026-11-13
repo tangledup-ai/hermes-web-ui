@@ -5,6 +5,10 @@ import { logger } from '../../public/logging'
 import { getWebUiHome } from '../../public/config'
 
 export interface MeetingData {
+  source?: 'h618'
+  markers?: Array<{ offsetMs: number }>
+  captureStatus?: 'complete' | 'partial' | 'offline' | 'interrupted'
+  transcriptIncomplete?: boolean
   id: string
   title: string
   createdAt: number

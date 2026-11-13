@@ -7,6 +7,7 @@ import { ensureRealtimeBackendReady } from '../modules/studio/services/realtime-
 import { logger } from '../modules/studio/public/logging'
 import { parseUpgradeRequestUrl, shouldRejectUpgradeOrigin, writeForbiddenOrigin } from '../modules/studio/middleware/security'
 import { MeetingProfileError, resolveMeetingProfile } from '../modules/studio/services/meeting-asr/profile'
+import { DEVICE_SOURCE_HEADER, isH618MeetingSource, trackDeviceTranscription } from '../modules/studio/services/meeting-asr/device-consent'
 import {
   meetingTranscriptionRequestContext,
   TRANSCRIPTION_CONTEXT_HEADER,
@@ -43,12 +44,17 @@ export function setupMeetingWebSocketProxy(servers: http.Server[]): void {
       const nativeLoopback = !req.headers.origin
         && (address === '::1' || /^127\./.test(address) || /^::ffff:127\./.test(address))
       const authorization = req.headers.authorization || ''
-      const token = upgradeUrl.searchParams.get('token')
-        || (authorization.startsWith('Bearer ') ? authorization.slice(7) : '')
+      const h618 = pathname === '/ws/asr' && isH618MeetingSource(req.headers[DEVICE_SOURCE_HEADER])
+      const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
+      const token = h618 ? bearer : upgradeUrl.searchParams.get('token') || bearer
       let user: Awaited<ReturnType<typeof authenticateUserToken>> = null
       let profile: string
       try {
         user = token ? await authenticateUserToken(token) : null
+        if (h618 && !user) {
+          socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+          return
+        }
         if (!nativeLoopback && await isAuthEnabled()) {
           const serverToken = token && !user ? await getToken() : ''
           const matchesServerToken = Boolean(token && serverToken && Buffer.byteLength(token) === Buffer.byteLength(serverToken)
@@ -58,7 +64,12 @@ export function setupMeetingWebSocketProxy(servers: http.Server[]): void {
             return
           }
         }
-        const requestedProfile = upgradeUrl.searchParams.get('profile') || undefined
+        const query = upgradeUrl.searchParams.get('profile') || undefined
+        const header = req.headers['x-hermes-profile']
+        if (h618 && (Array.isArray(header) || (query && header && query.trim() !== header.trim()))) {
+          throw new MeetingProfileError('Conflicting meeting profiles', 400)
+        }
+        const requestedProfile = h618 && typeof header === 'string' ? header : query
         profile = resolveMeetingProfile(user ?? undefined, nativeLoopback && !user ? undefined : requestedProfile)
       } catch (error) {
         if (error instanceof MeetingProfileError) {
@@ -77,6 +88,10 @@ export function setupMeetingWebSocketProxy(servers: http.Server[]): void {
       socket.once('close', () => clearTimeout(upgradeTimer))
       const forward = (upstream: import('net').Socket, contextHeaders: Record<string, string>): void => {
         clearTimeout(upgradeTimer)
+        if (socket.destroyed) {
+          upstream.destroy()
+          return
+        }
         const requestLine = `${req.method} ${upstreamPath} HTTP/${req.httpVersion}\r\n`
         const headers = [...Object.entries(req.headers)
           .filter(([key]) => key !== 'authorization' && key !== 'cookie'
@@ -98,9 +113,17 @@ export function setupMeetingWebSocketProxy(servers: http.Server[]): void {
 
       // The native realtime entry can be the first caller after a server restart.
       void (pathname === '/ws/omni-realtime' ? ensureRealtimeBackendReady() : Promise.resolve())
-        .then(() => meetingTranscriptionRequestContext(profile, user?.id, pathname === '/ws/omni-realtime' ? 'realtime' : 'transcription'))
-        .then(({ headers }) => {
+        .then(() => meetingTranscriptionRequestContext(profile, user?.id, pathname === '/ws/omni-realtime' ? 'realtime' : 'transcription', h618))
+        .then(({ headers, provider }) => {
           if (socket.destroyed) return
+          if (h618) {
+            const release = user && trackDeviceTranscription(user.id, profile, provider, () => socket.destroy())
+            if (!release) {
+              socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+              return
+            }
+            socket.once('close', release)
+          }
           const targetPort = pathname === '/ws/diarize' ? meetingASRService.getDiarizePort() : meetingASRService.getASRPort()
           if (!targetPort) {
             socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')

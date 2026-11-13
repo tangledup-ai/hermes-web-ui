@@ -22432,6 +22432,102 @@
         }
       }
     },
+    "/api/studio/meeting-asr/device-consent": {
+      "get": {
+        "tags": [
+          "Meeting-Asr"
+        ],
+        "summary": "Get device-consent",
+        "description": "GET /api/studio/meeting-asr/device-consent",
+        "operationId": "readDeviceConsent",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            }
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Meeting-Asr"
+        ],
+        "summary": "Update device-consent",
+        "description": "PUT /api/studio/meeting-asr/device-consent",
+        "operationId": "updateDeviceConsent",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "granted": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "provider": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/studio/meeting-asr/healthz": {
       "get": {
         "tags": [
@@ -22921,7 +23017,20 @@
           "404": {
             "description": "Not found"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            }
+          }
+        ]
       }
     },
     "/api/studio/meeting-storage/{meetingId}": {
@@ -22990,6 +23099,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -22998,8 +23118,17 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {},
-                "additionalProperties": true
+                "properties": {
+                  "captureStatus": {
+                    "type": "string"
+                  },
+                  "markers": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
@@ -23102,6 +23231,53 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/studio/meeting-storage/{meetingId}/device-recording": {
+      "put": {
+        "tags": [
+          "Meeting-Storage"
+        ],
+        "summary": "Update device-recording",
+        "description": "PUT /api/studio/meeting-storage/:meetingId/device-recording",
+        "operationId": "uploadDeviceRecording",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "parameters": [
+          {
+            "name": "meetingId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
             }
           }
         ]
@@ -23305,6 +23481,17 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "profile",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
             }
           }
         ],
