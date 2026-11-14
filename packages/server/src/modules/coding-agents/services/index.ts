@@ -8,7 +8,7 @@ import { prepareZcodeGlobalModel } from './zcode/runtime-config'
 import { NATIVE_CODING_AGENTS, prepareNativeScopedRuntime, nativeScopedUsesChatCompletions, checkNativeCodingAgentEnvironment, checkNativeCodingAgentPlatform } from './registry/native-agents'
 import { resolveZcodeCommand } from './zcode/installation'
 import { isNativeCodingAgent, nativeCodingAgentSupportsScoped, isGlobalOnlyCodingAgent } from '../../studio/contracts/agents/native-coding-agents'
-import { prioritizeManagedNpmBin } from './managed-command-path'
+import { codingAgentNpmEnvironment, prioritizeManagedNpmBin } from './managed-command-path'
 import { readTomlAssignment } from './toml-assignment'
 import { studioMcpCapabilities } from '../../studio/public/runs/mcp-capabilities'
 import { pluginMcpServers, mergePluginMcpServers } from '../../studio/public/plugin-mcp'
@@ -2296,11 +2296,11 @@ function getScopedConfigFileDefinition(
 
 function getCurrentNodeEnv(): NodeJS.ProcessEnv {
   const pathDelimiter = process.platform === 'win32' ? ';' : delimiter
-  return {
+  return codingAgentNpmEnvironment({
     ...process.env,
     PATH: [getNodeBinDir(), getNvmNodeBinPaths(), process.env.PATH].filter(Boolean).join(pathDelimiter),
     npm_node_execpath: process.execPath,
-  }
+  }, getWebUiHome())
 }
 
 async function npmExecution(args: string[], env: NodeJS.ProcessEnv): Promise<CommandExecution> {

@@ -5,8 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User={{APP_USER}}
-Group={{APP_USER}}
+# Device runtime (including terminals, Agents and plugins) runs as root.
+# APP_USER_HOME remains the existing data/tool home; do not move user state.
+User=root
+Group=root
 WorkingDirectory={{DEPLOY_DIR}}
 Environment=HOME={{APP_USER_HOME}}
 EnvironmentFile={{SERVICE_ENV_FILE}}
